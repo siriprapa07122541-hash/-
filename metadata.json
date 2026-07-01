@@ -1,0 +1,6 @@
+{
+  "name": "ระบบเบิก-คืนยา วิสัญญี",
+  "description": "Supply Anesth-KKU ระบบเบิก-คืนยา วิสัญญี คณะแพทยศาสตร์ มหาวิทยาลัยขอนแก่น สำหรับห้อง OR และบริหารจัดการ Stock",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

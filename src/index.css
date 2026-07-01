@@ -1,0 +1,114 @@
+@import url('https://fonts.googleapis.com/css2?family=Sarabun:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;1,100;1,200;1,300;1,400;1,500;1,600;1,700;1,800&family=Prompt:wght@300;400;500;600;700&family=Inter:wght@400;500;600;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Sarabun", "TH Sarabun New", "TH Sarabun PS", "Sarabun New", "Prompt", "Inter", ui-sans-serif, system-ui, sans-serif;
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* Print Styles */
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  .print-only {
+    display: block !important;
+  }
+  body {
+    background-color: white !important;
+    color: black !important;
+    font-size: 14px;
+  }
+  .print-card {
+    border: 1px solid #ccc !important;
+    box-shadow: none !important;
+    margin-bottom: 20px !important;
+    page-break-inside: avoid;
+  }
+}
+
+/* Global Font Enlargement overrides */
+body {
+  font-size: 15.5px !important;
+}
+
+input, select, textarea {
+  font-size: 14.5px !important;
+}
+
+label {
+  font-size: 13.5px !important;
+}
+
+.text-xxs {
+  font-size: 0.75rem !important; /* ~12px instead of 10px */
+}
+
+.text-xs {
+  font-size: 0.875rem !important; /* ~14px instead of 12px */
+}
+
+.text-sm {
+  font-size: 0.96875rem !important; /* ~15.5px instead of 14px */
+}
+
+.text-base {
+  font-size: 1.125rem !important; /* ~18px instead of 16px */
+}
+
+.text-lg {
+  font-size: 1.3125rem !important; /* ~21px instead of 18px */
+}
+
+.text-xl {
+  font-size: 1.5rem !important; /* ~24px instead of 20px */
+}
+
+.text-2xl {
+  font-size: 1.75rem !important; /* ~28px instead of 24px */
+}
+
+/* Animations for highlighting newly added rows smoothly */
+@keyframes row-flash-purple {
+  0% {
+    background-color: rgba(147, 51, 234, 0.25); /* light purple-600 */
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+.animate-row-flash-purple {
+  animation: row-flash-purple 4s ease-out forwards;
+}
+
+@keyframes row-flash-amber {
+  0% {
+    background-color: rgba(217, 119, 6, 0.25); /* light amber-600 */
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+.animate-row-flash-amber {
+  animation: row-flash-amber 4s ease-out forwards;
+}
+
+
+
