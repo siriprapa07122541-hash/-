@@ -166,11 +166,17 @@ export default function App() {
   // Smooth scroll to newly added row if it was self-added
   useEffect(() => {
     if (selfAddedTxId) {
-      const element = document.getElementById(`tx-row-${selfAddedTxId}`);
-      if (element) {
-        element.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        setSelfAddedTxId(null);
-      }
+      const timer = setTimeout(() => {
+        const element = 
+          document.getElementById(`tx-row-${selfAddedTxId}`) || 
+          document.getElementById(`tx-row-log-${selfAddedTxId}`) ||
+          document.getElementById(`tx-row-hist-${selfAddedTxId}`);
+        if (element) {
+          element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          setSelfAddedTxId(null);
+        }
+      }, 100);
+      return () => clearTimeout(timer);
     }
   }, [selfAddedTxId, transactions]);
 
@@ -380,125 +386,7 @@ export default function App() {
     return () => clearInterval(pollInterval);
   }, [transactions]);
 
-  // Enhanced Simulation of remote entries from other OR computer terminals (for offline/fallbacks)
-  useEffect(() => {
-    const devices = ['PC-OR02-ANESTH', 'PC-OR03-ANESTH', 'PC-OR04-ANESTH', 'PC-OR05-ANESTH', 'PC-OR06-ANESTH', 'PC-OR07-ANESTH', 'PC-OR08-ANESTH'];
-    const orRooms = ['OR Room 1', 'OR Room 2', 'OR Room 3', 'OR Room 4', 'OR Room 5', 'OR Room 6', 'OR Room 7', 'OR Room 8', 'Endo Room', 'ICU 1'];
-    const personnel = ['พญ.วรรณวิสา วิสัญญีแพทย์', 'นพ.พีรพงศ์ วิสัญญีแพทย์', 'คุณสมชาย พยาบาลวิสัญญี', 'คุณพัชรี พยาบาลวิสัญญี', 'คุณเกศรินทร์ พยาบาลวิสัญญี'];
-    const hnPrefixes = ['HN-692', 'HN-741', 'HN-539', 'HN-182', 'HN-305', 'HN-894'];
-    const drugKeys = Object.keys(SPECIAL_DRUGS_METADATA);
 
-    const interval = setInterval(() => {
-      // 30% chance to sync an entry every 25 seconds (simulates multiple suites entering case records)
-      if (Math.random() > 0.3) return;
-
-      const randomDevice = devices[Math.floor(Math.random() * devices.length)];
-      const randomOr = orRooms[Math.floor(Math.random() * orRooms.length)];
-      const randomPers = personnel[Math.floor(Math.random() * personnel.length)];
-      const randomHN = `${hnPrefixes[Math.floor(Math.random() * hnPrefixes.length)]}${Math.floor(1000 + Math.random() * 9000)}`;
-      const randomDrug = drugKeys[Math.floor(Math.random() * drugKeys.length)];
-      const meta = SPECIAL_DRUGS_METADATA[randomDrug];
-
-      const ampsCount = Math.floor(Math.random() * 2) + 1; // 1 or 2 amps
-      const useMode = Math.random() > 0.5 ? 'full' : 'partial';
-
-      let usedVal = ampsCount * meta.capacity;
-      let wasteVal = 0;
-
-      if (useMode === 'partial') {
-        usedVal = parseFloat((Math.random() * (ampsCount * meta.capacity - 0.5) + 0.5).toFixed(1));
-        wasteVal = parseFloat((ampsCount * meta.capacity - usedVal).toFixed(1));
-      }
-
-      const txItem = {
-        name: randomDrug,
-        quantity: usedVal,
-        unit: useMode === 'full'
-          ? `${meta.unit} (ใช้เต็ม ${ampsCount} ${meta.type === 'Amp' ? 'แอมป์' : 'ขวด'})`
-          : `${meta.unit} (เปิด ${ampsCount} ${meta.type === 'Amp' ? 'แอมป์' : 'ขวด'}, ทิ้ง ${wasteVal} ${meta.unit})`
-      };
-
-      const remoteTxId = `remote-tx-${Date.now()}-${Math.random()}`;
-      const remoteTx: Transaction = {
-        id: remoteTxId,
-        timestamp: new Date().toISOString(),
-        type: 'เบิก',
-        orRoom: randomOr,
-        patientHN: randomHN,
-        requesterName: randomPers,
-        blockBox: 'ไม่เบิก',
-        extraBox: 'ไม่เบิก',
-        coldBox: 'ไม่เบิก',
-        roomTempBox: 'ไม่เบิก',
-        coldOrRoomTempBox: 'ไม่เบิก',
-        notes: '[ยาควบคุมพิเศษ (คีย์ต่างเครื่อง)]',
-        items: [],
-        specialControlledDrugs: [txItem],
-        deviceName: randomDevice,
-        syncStatus: 'Synced'
-      };
-
-      // Push remote transaction to feed
-      setTransactions(prev => [remoteTx, ...prev]);
-
-      // Set Highlight for the simulated remote entry
-      setHighlightedTxIds(prevHighlighted => {
-        const updated = new Set(prevHighlighted);
-        updated.add(remoteTxId);
-        return updated;
-      });
-
-      // Clear highlights after 4 seconds
-      setTimeout(() => {
-        setHighlightedTxIds(prevHighlighted => {
-          const updated = new Set(prevHighlighted);
-          updated.delete(remoteTxId);
-          return updated;
-        });
-      }, 4000);
-
-      // Deduct central cabinet stock
-      setDrugs(prevDrugs => {
-        return prevDrugs.map(d => {
-          if (mapSpecialDrugToCabinetDrugId(randomDrug) === d.id) {
-            return {
-              ...d,
-              stock: Math.max(0, d.stock - ampsCount)
-            };
-          }
-          return d;
-        });
-      });
-
-      // Track empty ampoule returns
-      setEmptyAmpsAccumulator(prev => ({
-        ...prev,
-        [randomDrug]: (prev[randomDrug] || 0) + ampsCount
-      }));
-
-      // Non-intrusive beautiful live sync status notification (Toast)
-      const Toast = Swal.mixin({
-        toast: true,
-        position: 'top-end',
-        showConfirmButton: false,
-        timer: 3500,
-        timerProgressBar: true,
-        didOpen: (toast) => {
-          toast.addEventListener('mouseenter', Swal.stopTimer);
-          toast.addEventListener('mouseleave', Swal.resumeTimer);
-        }
-      });
-
-      Toast.fire({
-        icon: 'info',
-        title: `ซิงค์สำเร็จ: มีการคีย์ยาควบคุมพิเศษจาก ${randomDevice}`,
-        html: `<p class="text-[11px] text-slate-600 text-left"><strong>${randomOr}</strong> • HN: ${randomHN}<br/>ใช้ ${meta.display} x ${ampsCount} แอมป์ (${useMode === 'full' ? 'เต็มแอมป์' : `ใช้ ${usedVal} / ทิ้ง ${wasteVal}`})</p>`
-      });
-
-    }, 25000); // Trigger check every 25 seconds
-
-    return () => clearInterval(interval);
-  }, []);
 
   useEffect(() => {
     const handleAfterPrint = () => {
@@ -694,7 +582,7 @@ export default function App() {
   const [historySearchDevice, setHistorySearchDevice] = useState<string>('');
   const [historySearchSync, setHistorySearchSync] = useState<string>('all');
 
-  // --- Real-time Sync & Simulator States ---
+  // --- Real-time Sync States ---
   const [deviceName, setDeviceName] = useState<string>(() => {
     return localStorage.getItem('supply_anesth_device_name') || `PC-OR0${Math.floor(Math.random() * 8) + 1}-ANESTH`;
   });
@@ -705,11 +593,6 @@ export default function App() {
   const [syncTech, setSyncTech] = useState<'WebSockets' | 'SSE' | 'LongPolling'>('WebSockets');
   const [lastSyncedTime, setLastSyncedTime] = useState<string>(() => new Date().toLocaleTimeString('th-TH'));
   const [showSyncSettings, setShowSyncSettings] = useState<boolean>(false);
-  const [simulatorLogs, setSimulatorLogs] = useState<string[]>([
-    `[ระบบ] สตาร์ทระบบเชื่อมต่อข้อมูลเรียลไทม์...`,
-    `[ซิงค์] สถาปนาการเชื่อมต่อแบบ WebSockets สำเร็จ`,
-    `[เชื่อมต่อ] ได้รับหมายเลข session: ws_session_${Math.random().toString(36).substring(3, 9).toUpperCase()}`
-  ]);
   const [conflictActive, setConflictActive] = useState<boolean>(false);
   const [conflictDetails, setConflictDetails] = useState<{
     localTx: any;
@@ -740,10 +623,6 @@ export default function App() {
       if (msg.type === 'SYNC_DATA') {
         isRemoteSyncRef.current = true;
         setSyncState('Loading');
-        setSimulatorLogs(prev => [
-          `[รับข้อมูล] ได้รับประวัติเบิกคืนยาล่าสุดจากเครื่อง ${msg.deviceName} (เวลา ${new Date().toLocaleTimeString('th-TH')})`,
-          ...prev.slice(0, 15)
-        ]);
         
         setTimeout(() => {
           setDrugs(msg.drugs);
@@ -790,258 +669,6 @@ export default function App() {
     }
   }, [drugs, transactions, deviceName]);
 
-  // Simulate transactional data changes from another device
-  const handleSimulateRemoteTransaction = () => {
-    setSyncState('Loading');
-    setSimulatorLogs(prev => [
-      `[เครือข่าย] กำลังรับข้อมูลพุชแบบเซิร์ฟเวอร์ (Server Push)...`,
-      ...prev.slice(0, 15)
-    ]);
-
-    setTimeout(() => {
-      const remoteDevices = ['PC-OR02-ANESTH', 'PC-OR05-ANESTH', 'IPAD-ANESTH-02', 'PC-PACU-01'];
-      const chosenDevice = remoteDevices[Math.floor(Math.random() * remoteDevices.length)];
-      
-      const remoteStaffs = ['พญ. ณัฐกานต์ (วิสัญญีแพทย์)', 'นพ. เกรียงไกร (วิสัญญีแพทย์)', 'คุณสมควร (พยาบาลวิสัญญี)', 'คุณวิภาวี (พยาบาลห้องผ่าตัด)'];
-      const chosenStaff = remoteStaffs[Math.floor(Math.random() * remoteStaffs.length)];
-
-      const randomDrugs = drugs.filter(d => d.stock > 10);
-      if (randomDrugs.length === 0) return;
-      const chosenDrug = randomDrugs[Math.floor(Math.random() * randomDrugs.length)];
-      const quantityToDeduct = Math.floor(Math.random() * 3) + 1;
-
-      // Update local drugs stock
-      const updatedDrugs = drugs.map(d => {
-        if (d.id === chosenDrug.id) {
-          return { ...d, stock: Math.max(0, d.stock - quantityToDeduct) };
-        }
-        return d;
-      });
-
-      // Create remote transaction
-      const remoteTx: Transaction = {
-        id: `tx-sim-${Date.now()}`,
-        timestamp: new Date().toISOString(),
-        type: 'เบิก',
-        orRoom: OR_ROOMS[Math.floor(Math.random() * OR_ROOMS.length)],
-        patientHN: `HN-${Math.floor(100000 + Math.random() * 900000)} / จำลองผู้ป่วยฉุกเฉิน`,
-        requesterName: chosenStaff,
-        blockBox: 'ไม่เบิก',
-        extraBox: 'ไม่เบิก',
-        coldOrRoomTempBox: 'ไม่เบิก',
-        notes: `[จำลองข้อมูลเรียลไทม์จากเครื่องอื่น] คลังถูกปรับเปลี่ยน ${quantityToDeduct} ${chosenDrug.unit}`,
-        items: [
-          {
-            drugId: chosenDrug.id,
-            name: chosenDrug.name,
-            category: chosenDrug.category,
-            quantity: quantityToDeduct
-          }
-        ],
-        deviceName: chosenDevice,
-        syncStatus: 'Synced'
-      };
-
-      setDrugs(updatedDrugs);
-      setTransactions(prevTxs => [remoteTx, ...prevTxs]);
-      setSyncState('Synced');
-      setLastSyncedTime(new Date().toLocaleTimeString('th-TH'));
-      setSimulatorLogs(prev => [
-        `[เบิกต่างเครื่อง] ${chosenDevice} (${chosenStaff}) ได้เบิกยา ${chosenDrug.name} x${quantityToDeduct} ${chosenDrug.unit} สำเร็จ`,
-        ...prev.slice(0, 15)
-      ]);
-
-      Swal.fire({
-        toast: true,
-        position: 'top-end',
-        icon: 'success',
-        title: `ข้อมูลอัปเดตเรียลไทม์!`,
-        text: `เครื่อง ${chosenDevice} เบิกยา ${chosenDrug.name} x${quantityToDeduct} ${chosenDrug.unit}`,
-        showConfirmButton: false,
-        timer: 4500,
-        timerProgressBar: true
-      });
-    }, 1000);
-  };
-
-  // Simulate transactional data changes for special controlled drugs from another device
-  const handleSimulateControlledEntry = () => {
-    setSyncState('Loading');
-    setSimulatorLogs(prev => [
-      `[เครือข่าย] กำลังซิงค์และดึงรายงานตัดยอดใช้ยาควบคุมพิเศษสดจากเครื่องอื่น...`,
-      ...prev.slice(0, 15)
-    ]);
-
-    setTimeout(() => {
-      const remoteStaffList = [
-        'นพ. เกรียงไกร (วิสัญญีแพทย์)', 
-        'พญ. มนัสวี (วิสัญญีแพทย์)', 
-        'พยาบาลวิสัญญี อารีวรรณ', 
-        'นพ. วีรวัฒน์ (วิสัญญีแพทย์)',
-        'พยาบาลวิสัญญี สุดารัตน์'
-      ];
-      const remoteDevicesList = [
-        'PC-OR03-ANESTH', 
-        'PC-OR05-ANESTH', 
-        'IPAD-ANESTH-02', 
-        'PC-OR02-ANESTH', 
-        'PC-OR06-ANESTH'
-      ];
-      const randomStaff = remoteStaffList[Math.floor(Math.random() * remoteStaffList.length)];
-      const randomDevice = remoteDevicesList[Math.floor(Math.random() * remoteDevicesList.length)];
-      const randomOr = OR_ROOMS[Math.floor(Math.random() * OR_ROOMS.length)];
-      const randomHn = `HN-${Math.floor(Math.random() * 900000) + 100000}`;
-      
-      // สุ่มเลือกยากลุ่มควบคุมพิเศษ
-      const availableDrugs = ['Morphine', 'Fentanyl 2 ml', 'Fentanyl 10 ml', 'Pethidine', 'Ketamine'];
-      const selectedDrugName = availableDrugs[Math.floor(Math.random() * availableDrugs.length)];
-      
-      const SPECIAL_DRUGS_META: Record<string, { type: string, capacity: number, unit: string, display: string }> = {
-        'Morphine': { type: 'Amp', capacity: 10, unit: 'mg', display: 'Morphine 10mg' },
-        'Fentanyl 2 ml': { type: 'Amp', capacity: 100, unit: 'mcg', display: 'Fentanyl 2ml (100mcg)' },
-        'Fentanyl 10 ml': { type: 'Amp', capacity: 500, unit: 'mcg', display: 'Fentanyl 10ml (500mcg)' },
-        'Pethidine': { type: 'Amp', capacity: 50, unit: 'mg', display: 'Pethidine 50mg' },
-        'Ketamine': { type: 'Vial', capacity: 500, unit: 'mg', display: 'Ketamine 500mg' }
-      };
-
-      const meta = SPECIAL_DRUGS_META[selectedDrugName] || { type: 'Amp', capacity: 10, unit: 'mg', display: selectedDrugName };
-      
-      const amps = Math.floor(Math.random() * 2) + 1; // 1-2 แอมป์
-      const totalCapacity = amps * meta.capacity;
-      
-      // สุ่มการใช้จริงกับยาทิ้ง
-      let used = totalCapacity;
-      let wastage = 0;
-      if (Math.random() > 0.4) {
-        used = parseFloat((totalCapacity * (0.5 + Math.random() * 0.4)).toFixed(1));
-        wastage = parseFloat((totalCapacity - used).toFixed(1));
-      }
-      
-      const unitText = used === totalCapacity 
-        ? `${meta.unit} (ใช้เต็ม ${amps} ${meta.type === 'Amp' ? 'แอมป์' : 'ขวด'})`
-        : `${meta.unit} (เปิด ${amps} ${meta.type === 'Amp' ? 'แอมป์' : 'ขวด'}, ทิ้ง ${wastage} ${meta.unit})`;
-
-      const txItem = {
-        name: selectedDrugName,
-        quantity: used,
-        unit: unitText
-      };
-
-      const newTx: Transaction = {
-        id: `tx-controlled-sim-${Date.now()}`,
-        timestamp: new Date().toISOString(),
-        type: 'เบิก',
-        orRoom: randomOr,
-        patientHN: randomHn,
-        requesterName: randomStaff,
-        blockBox: 'ไม่เบิก',
-        extraBox: 'ไม่เบิก',
-        coldOrRoomTempBox: 'ไม่เบิก',
-        notes: '[ยาควบคุมพิเศษ] คีย์เรียลไทม์ผ่านเครื่องคอมพิวเตอร์อื่น',
-        deviceName: randomDevice,
-        syncStatus: 'Synced',
-        items: [],
-        specialControlledDrugs: [txItem]
-      };
-
-      // ค่อย ๆ หักสต็อกยาควบคุมพิเศษด้วย
-      const drugIdInCabinet = mapSpecialDrugToCabinetDrugId(selectedDrugName);
-      setDrugs(prevDrugs => {
-        return prevDrugs.map(d => {
-          if (d.id === drugIdInCabinet) {
-            return {
-              ...d,
-              stock: Math.max(0, d.stock - amps)
-            };
-          }
-          return d;
-        });
-      });
-
-      // ค่อยๆ เพิ่มสะสม empty amps
-      setEmptyAmpsAccumulator(prev => {
-        const updated = { ...prev };
-        updated[selectedDrugName] = (updated[selectedDrugName] || 0) + amps;
-        return updated;
-      });
-
-      setTransactions(prevTxs => [newTx, ...prevTxs]);
-      setSyncState('Synced');
-      setLastSyncedTime(new Date().toLocaleTimeString('th-TH'));
-
-      setSimulatorLogs(prev => [
-        `[คีย์ยาต่างเครื่อง] ${randomDevice} (${randomStaff}) ได้คีย์รายงานตัดยอดใช้ยาควบคุมพิเศษ ${meta.display} (เปิด ${amps} แอมป์/ขวด) ในห้อง ${randomOr} สำเร็จ`,
-        `[ระบบ] ปรับสต็อกกลางของคลังเวชภัณฑ์วิสัญญีเรียบร้อย`,
-        ...prev.slice(0, 15)
-      ]);
-
-      Swal.fire({
-        toast: true,
-        position: 'bottom-end',
-        icon: 'info',
-        title: `ได้รับข้อมูลเรียลไทม์จาก ${randomDevice}!`,
-        html: `ห้อง ${randomOr} คีย์รายงาน <strong>${meta.display}</strong> (เปิด ${amps} ${meta.type === 'Amp' ? 'แอมป์' : 'ขวด'}) โดย ${randomStaff}`,
-        showConfirmButton: false,
-        timer: 5000,
-        timerProgressBar: true,
-        background: '#0f172a',
-        color: '#f8fafc'
-      });
-    }, 1000);
-  };
-
-  // Simulate Multi-Device Stock Conflict
-  const handleSimulateConflict = () => {
-    setSyncState('Conflict');
-    setSimulatorLogs(prev => [
-      `[เตือน] ตรวจพบความขัดแย้งของข้อมูลคลังยากลุ่มควบคุมพิเศษ!`,
-      `[ขัดแย้ง] เครื่อง PC-OR05-ANESTH กำลังพยายามแก้ไขคลังยา Fentanyl 2 ml ในเวลาเดียวกัน`,
-      ...prev.slice(0, 15)
-    ]);
-
-    const fentanylDrug = drugs.find(d => d.name.toLowerCase().includes('fentanyl')) || drugs[0];
-
-    setConflictDetails({
-      localTx: {
-        id: `tx-conflict-local-${Date.now()}`,
-        timestamp: new Date().toISOString(),
-        type: 'เบิก',
-        orRoom: 'ห้องผ่าตัด 3 (OR 3)',
-        patientHN: 'นายสมศักดิ์ รักดี / HN-552918',
-        requesterName: currentStaffName,
-        deviceName: deviceName,
-        quantity: 3,
-        drugName: fentanylDrug.name,
-      },
-      remoteTx: {
-        id: `tx-conflict-remote-${Date.now()}`,
-        timestamp: new Date().toISOString(),
-        type: 'เบิก',
-        orRoom: 'ห้องผ่าตัด 5 (OR 5)',
-        patientHN: 'นางสาวมาลี วงศ์วรรณ / HN-112349',
-        requesterName: 'นพ. อนันต์ (วิสัญญีแพทย์)',
-        deviceName: 'PC-OR05-ANESTH',
-        quantity: 5,
-        drugName: fentanylDrug.name,
-      },
-      drugId: fentanylDrug.id,
-      drugName: fentanylDrug.name,
-      localStock: fentanylDrug.stock,
-      remoteStock: Math.max(0, fentanylDrug.stock - 5),
-      expectedStock: fentanylDrug.stock
-    });
-
-    setConflictActive(true);
-
-    Swal.fire({
-      title: 'ตรวจพบความขัดแย้งของข้อมูล!',
-      text: `ข้อมูลสต็อกยา ${fentanylDrug.name} บนเซิร์ฟเวอร์ส่วนกลางถูกแก้ไขโดยเครื่อง PC-OR05-ANESTH ในเวลาเสี้ยววินาทีเดียวกัน กรุณาตรวจสอบสถานะและเลือกแนวทางการแก้ไข`,
-      icon: 'warning',
-      confirmButtonText: 'เปิดหน้าต่างแก้ไข (Conflict UI)',
-      confirmButtonColor: '#f59e0b',
-    });
-  };
-
   // Resolve conflict handler
   const handleResolveConflict = (resolution: 'merge' | 'use_remote' | 'override_server') => {
     if (!conflictDetails) return;
@@ -1053,7 +680,6 @@ export default function App() {
       const { drugId, drugName, localTx, remoteTx, expectedStock } = conflictDetails;
       
       let nextStock = expectedStock;
-      let logMsg = '';
       let toastText = '';
 
       if (resolution === 'merge') {
@@ -1074,7 +700,6 @@ export default function App() {
           ...prev
         ]);
 
-        logMsg = `[แก้ไขขัดแย้ง] รวมยอดเบิก (เครื่องนี้เบิก ${localTx.quantity} + PC-OR05 เบิก ${remoteTx.quantity}) สต็อก ${drugName} เหลือ ${nextStock}`;
         toastText = `บันทึกรายการทั้งสองเครื่องเรียบร้อย ยอดคงคลังปรับลดเหลือ ${nextStock}`;
       } 
       else if (resolution === 'use_remote') {
@@ -1089,7 +714,6 @@ export default function App() {
           ...prev
         ]);
 
-        logMsg = `[แก้ไขขัดแย้ง] ยอมรับรายการเบิกของฝั่งเซิร์ฟเวอร์ (${remoteTx.deviceName}) สต็อก ${drugName} ปรับเป็น ${nextStock}`;
         toastText = `ยอมรับข้อมูลจากเครื่องอื่น เรียบร้อย`;
       } 
       else if (resolution === 'override_server') {
@@ -1104,7 +728,6 @@ export default function App() {
           ...prev
         ]);
 
-        logMsg = `[แก้ไขขัดแย้ง] ยืนยันเครื่องนี้และเขียนทับข้อมูลเซิร์ฟเวอร์ สต็อก ${drugName} ปรับเป็น ${nextStock}`;
         toastText = `ข้อมูลสต็อกของเครื่องนี้ถูกเขียนทับไปยังระบบส่วนกลางเรียบร้อย`;
       }
 
@@ -1117,7 +740,6 @@ export default function App() {
 
       setSyncState('Synced');
       setLastSyncedTime(new Date().toLocaleTimeString('th-TH'));
-      setSimulatorLogs(prev => [logMsg, ...prev.slice(0, 15)]);
       setConflictDetails(null);
 
       Swal.fire({
@@ -5480,7 +5102,15 @@ export default function App() {
                               </tr>
                             ) : (
                               filteredHistory.map(tx => (
-                                <tr key={tx.id} className="hover:bg-slate-50/25 align-top transition-colors duration-150">
+                                <tr 
+                                  key={tx.id} 
+                                  id={`tx-row-hist-${tx.id}`}
+                                  className={`hover:bg-slate-50/25 align-top transition-colors duration-150 ${
+                                    highlightedTxIds.has(tx.id) 
+                                      ? (tx.notes?.includes('[ยาควบคุมพิเศษ]') || tx.specialControlledDrugs?.length > 0 ? 'animate-row-flash-purple' : 'animate-row-flash-amber') 
+                                      : ''
+                                  }`}
+                                >
                                   <td className="py-4 px-6 font-mono text-slate-500 text-[10px] leading-relaxed">
                                     {new Date(tx.timestamp).toLocaleString('th-TH', {
                                       year: 'numeric',
