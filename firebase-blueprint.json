@@ -1,0 +1,51 @@
+{
+  "entities": {
+    "Drug": {
+      "title": "Drug",
+      "description": "A drug available in the anesthesia stock",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "category": { "type": "string" },
+        "stock": { "type": "number" },
+        "unit": { "type": "string" }
+      },
+      "required": ["id", "name", "category", "stock", "unit"]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "A transaction of drug retrieval or return",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "type": { "type": "string" },
+        "orRoom": { "type": "string" },
+        "patientHN": { "type": "string" },
+        "requesterName": { "type": "string" },
+        "blockBox": { "type": "string" },
+        "extraBox": { "type": "string" },
+        "coldBox": { "type": "string" },
+        "roomTempBox": { "type": "string" },
+        "coldOrRoomTempBox": { "type": "string" },
+        "notes": { "type": "string" },
+        "items": { "type": "array" },
+        "specialControlledDrugs": { "type": "array" },
+        "deviceName": { "type": "string" },
+        "syncStatus": { "type": "string" }
+      },
+      "required": ["id", "timestamp", "type", "orRoom", "patientHN", "requesterName", "items"]
+    }
+  },
+  "firestore": {
+    "drugs/{drugId}": {
+      "schema": "Drug",
+      "description": "Drugs catalog and stock balances"
+    },
+    "transactions/{transactionId}": {
+      "schema": "Transaction",
+      "description": "Records of drug distribution transactions"
+    }
+  }
+}

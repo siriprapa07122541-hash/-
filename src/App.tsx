@@ -14,6 +14,10 @@ import { OR_ROOMS, CATEGORY_LABELS, DEFAULT_DRUGS } from './data';
 import { INITIAL_TRANSACTIONS } from './initialTransactions';
 import Dashboard from './components/Dashboard';
 
+// Import Firebase Client & Firestore modular functions
+import { db } from './lib/firebase';
+import { collection, onSnapshot, doc, setDoc, updateDoc, deleteDoc, writeBatch } from 'firebase/firestore';
+
 // Import local banner image (using standard public-asset path or relative source asset)
 // @ts-ignore
 import bannerImg from './assets/images/minimal_anesthesia_banner_1782308055354.jpg';
@@ -142,13 +146,21 @@ export default function App() {
   const [transactions, setTransactions] = useState<Transaction[]>(() => {
     const saved = localStorage.getItem('supply_anesth_transactions');
     const raw = saved ? JSON.parse(saved) : INITIAL_TRANSACTIONS;
-    return raw.map((tx: any) => ({
-      ...tx,
-      coldBox: tx.coldBox || 'ไม่เบิก',
-      roomTempBox: tx.roomTempBox || 'ไม่เบิก',
-      coldOrRoomTempBox: tx.coldOrRoomTempBox || (tx.coldBox === 'เบิก' || tx.roomTempBox === 'เบิก' ? 'เบิก' : (tx.type === 'เบิก' ? 'ไม่เบิก' : 'ไม่ได้เบิก')),
-      notes: tx.notes || ''
-    }));
+    const seen = new Set<string>();
+    const unique: Transaction[] = [];
+    raw.forEach((tx: any) => {
+      if (tx && tx.id && !seen.has(tx.id)) {
+        seen.add(tx.id);
+        unique.push({
+          ...tx,
+          coldBox: tx.coldBox || 'ไม่เบิก',
+          roomTempBox: tx.roomTempBox || 'ไม่เบิก',
+          coldOrRoomTempBox: tx.coldOrRoomTempBox || (tx.coldBox === 'เบิก' || tx.roomTempBox === 'เบิก' ? 'เบิก' : (tx.type === 'เบิก' ? 'ไม่เบิก' : 'ไม่ได้เบิก')),
+          notes: tx.notes || ''
+        });
+      }
+    });
+    return unique;
   });
 
   useEffect(() => {
@@ -158,6 +170,18 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('supply_anesth_transactions', JSON.stringify(transactions));
   }, [transactions]);
+
+  // Refs to always access latest state inside the 7-second interval without restarting it
+  const transactionsRef = React.useRef<Transaction[]>([]);
+  const drugsRef = React.useRef<Drug[]>([]);
+
+  useEffect(() => {
+    transactionsRef.current = transactions;
+  }, [transactions]);
+
+  useEffect(() => {
+    drugsRef.current = drugs;
+  }, [drugs]);
 
   // --- States for highlighting and smooth scrolling ---
   const [highlightedTxIds, setHighlightedTxIds] = useState<Set<string>>(new Set());
@@ -235,6 +259,7 @@ export default function App() {
         if (response && response.status === 'success' && response.sheets) {
           const sheetsData = response.sheets;
           const newTransactions: Transaction[] = [];
+          const seenNewIds = new Set<string>();
 
           // Parse 'ยาควบคุมพิเศษ' sheet rows
           if (Array.isArray(sheetsData['ยาควบคุมพิเศษ'])) {
@@ -253,10 +278,11 @@ export default function App() {
               const cleanHn = hn.replace(/[^\d\w]/g, '');
               const txId = `sheets-scd-${cleanTs}-${cleanHn}-${drugName}`.substring(0, 100);
 
-              // Skip if this transaction ID already exists in our local state to prevent duplicates
-              if (transactions.some(tx => tx.id === txId || (tx.timestamp && tx.timestamp.includes(timestampStr)))) {
+              // Skip if this transaction ID already exists in our local state or is already parsed to prevent duplicates
+              if (seenNewIds.has(txId) || transactionsRef.current.some(tx => tx.id === txId)) {
                 return;
               }
+              seenNewIds.add(txId);
 
               const meta = SPECIAL_DRUGS_METADATA[drugName] || { unit: 'mg', type: 'Amp' };
               const txItem = {
@@ -282,7 +308,7 @@ export default function App() {
                 notes: row.notes || '[ยาควบคุมพิเศษ]',
                 items: [],
                 specialControlledDrugs: [txItem],
-                deviceName: 'PC-OR-REMOTE',
+                deviceName: row.deviceName || row.DeviceName || row.Device || 'PC-OR-REMOTE',
                 syncStatus: 'Synced'
               };
 
@@ -304,9 +330,10 @@ export default function App() {
               const cleanHn = hn.replace(/[^\d\w]/g, '');
               const txId = `sheets-draw-${cleanTs}-${cleanHn}-${drugName}`.substring(0, 100);
 
-              if (transactions.some(tx => tx.id === txId || (tx.timestamp && tx.timestamp.includes(timestampStr)))) {
+              if (seenNewIds.has(txId) || transactionsRef.current.some(tx => tx.id === txId)) {
                 return;
               }
+              seenNewIds.add(txId);
 
               const tx: Transaction = {
                 id: txId,
@@ -327,7 +354,51 @@ export default function App() {
                   category: 'other',
                   quantity: qty
                 }],
-                deviceName: 'PC-OR-REMOTE',
+                deviceName: row.deviceName || row.DeviceName || row.Device || 'PC-OR-REMOTE',
+                syncStatus: 'Synced'
+              };
+
+              newTransactions.push(tx);
+            });
+          }
+
+          // Parse 'คืนยา' sheet rows
+          if (Array.isArray(sheetsData['คืนยา'])) {
+            sheetsData['คืนยา'].forEach((row: any) => {
+              const timestampStr = String(row.Timestamp || '');
+              const drugName = String(row.DrugName || '');
+              const qty = row.AmpouleCount !== undefined ? parseFloat(row.AmpouleCount) : 1;
+              const sender = String(row.SenderName || row.NurseName || 'ไม่ระบุชื่อ');
+
+              const cleanTs = timestampStr.replace(/[^\d]/g, '');
+              const cleanDrug = drugName.replace(/[^\d\w]/g, '');
+              const txId = `sheets-ret-${cleanTs}-${cleanDrug}`.substring(0, 100);
+
+              if (seenNewIds.has(txId) || transactionsRef.current.some(tx => tx.id === txId)) {
+                return;
+              }
+              seenNewIds.add(txId);
+
+              const tx: Transaction = {
+                id: txId,
+                timestamp: parseThaiTimestamp(timestampStr),
+                type: 'คืน',
+                orRoom: row.orRoom || 'OR Room 1',
+                patientHN: 'คืนคลังห้องยา',
+                requesterName: sender,
+                blockBox: row.blockBox || 'ไม่ได้เบิก',
+                extraBox: row.extraBox || 'ไม่ได้เบิก',
+                coldBox: 'ไม่เบิก',
+                roomTempBox: 'ไม่เบิก',
+                coldOrRoomTempBox: row.coldOrRoomTempBox || 'ไม่ได้เบิก',
+                notes: row.notes || 'ส่งคืนผ่าน Google Sheets',
+                items: [{
+                  drugId: drugName.toLowerCase().replace(/\s+/g, '-'),
+                  name: drugName,
+                  category: 'other',
+                  quantity: qty
+                }],
+                deviceName: row.deviceName || row.DeviceName || row.Device || 'PC-OR-REMOTE',
                 syncStatus: 'Synced'
               };
 
@@ -336,6 +407,97 @@ export default function App() {
           }
 
           if (newTransactions.length > 0) {
+            // Update local drug stocks to reflect these new transactions
+            setDrugs(prevDrugs => {
+              let updatedDrugs = [...prevDrugs];
+              newTransactions.forEach(tx => {
+                if (tx.items && tx.items.length > 0) {
+                  tx.items.forEach(item => {
+                    updatedDrugs = updatedDrugs.map(d => {
+                      if (d.name.toLowerCase() === item.name.toLowerCase() || d.id.toLowerCase() === item.drugId?.toLowerCase()) {
+                        const change = tx.type === 'คืน' ? item.quantity : -item.quantity;
+                        return { ...d, stock: Math.max(0, d.stock + change) };
+                      }
+                      return d;
+                    });
+                  });
+                }
+                if (tx.specialControlledDrugs && tx.specialControlledDrugs.length > 0) {
+                  tx.specialControlledDrugs.forEach(scd => {
+                    const cabinetDrugId = mapSpecialDrugToCabinetDrugId(scd.name);
+                    updatedDrugs = updatedDrugs.map(d => {
+                      if (d.id === cabinetDrugId || d.name.toLowerCase() === scd.name.toLowerCase()) {
+                        let ampsCount = 1;
+                        const unitStr = scd.unit || '';
+                        const openedMatch = unitStr.match(/(?:เปิด|ใช้เต็ม)\s*(\d+)/i);
+                        if (openedMatch && openedMatch[1]) {
+                          ampsCount = parseInt(openedMatch[1], 10);
+                        }
+                        return { ...d, stock: Math.max(0, d.stock - ampsCount) };
+                      }
+                      return d;
+                    });
+                  });
+                }
+              });
+              return updatedDrugs;
+            });
+
+            // Write to Firestore and adjust stocks
+            try {
+              const batch = writeBatch(db);
+              let hasFirestoreUpdates = false;
+
+              newTransactions.forEach(tx => {
+                const txRef = doc(db, 'transactions', tx.id);
+                batch.set(txRef, tx);
+                hasFirestoreUpdates = true;
+
+                // Adjust stock for 'เบิกยา' / 'คืนยา' standard transactions
+                if (tx.items && tx.items.length > 0) {
+                  tx.items.forEach(item => {
+                    const drugItem = drugsRef.current.find(d => 
+                      d.name.toLowerCase() === item.name.toLowerCase() || 
+                      d.id.toLowerCase() === item.drugId?.toLowerCase()
+                    );
+                    if (drugItem) {
+                      const change = tx.type === 'คืน' ? item.quantity : -item.quantity;
+                      const nextStock = Math.max(0, drugItem.stock + change);
+                      const drugRef = doc(db, 'drugs', drugItem.id);
+                      batch.update(drugRef, { stock: nextStock });
+                    }
+                  });
+                }
+
+                // Adjust stock for 'ยาควบคุมพิเศษ' transactions (always deducts based on opened Amps)
+                if (tx.specialControlledDrugs && tx.specialControlledDrugs.length > 0) {
+                  tx.specialControlledDrugs.forEach(scd => {
+                    const cabinetDrugId = mapSpecialDrugToCabinetDrugId(scd.name);
+                    const drugItem = drugsRef.current.find(d => d.id === cabinetDrugId || d.name.toLowerCase() === scd.name.toLowerCase());
+                    if (drugItem) {
+                      let ampsCount = 1;
+                      const unitStr = scd.unit || '';
+                      const openedMatch = unitStr.match(/(?:เปิด|ใช้เต็ม)\s*(\d+)/i);
+                      if (openedMatch && openedMatch[1]) {
+                        ampsCount = parseInt(openedMatch[1], 10);
+                      }
+                      
+                      const nextStock = Math.max(0, drugItem.stock - ampsCount);
+                      const drugRef = doc(db, 'drugs', drugItem.id);
+                      batch.update(drugRef, { stock: nextStock });
+                    }
+                  });
+                }
+              });
+
+              if (hasFirestoreUpdates) {
+                await batch.commit();
+                console.log(`Successfully batched and committed ${newTransactions.length} transaction(s) to Firestore`);
+              }
+            } catch (fsErr) {
+              console.error("Firestore batch update from Google Sheets sync error:", fsErr);
+            }
+
             setTransactions(prev => {
               const filteredNew = newTransactions.filter(newTx => !prev.some(p => p.id === newTx.id));
               if (filteredNew.length === 0) return prev;
@@ -371,7 +533,8 @@ export default function App() {
                 text: `อัปเดตตารางและปรับยอดสต็อกเรียลไทม์แล้ว`
               });
 
-              return [...filteredNew, ...prev];
+              const combined = [...filteredNew, ...prev];
+              return Array.from(new Map(combined.map(t => [t.id, t])).values());
             });
           }
         }
@@ -384,7 +547,7 @@ export default function App() {
     syncWithGoogleSheets();
     const pollInterval = setInterval(syncWithGoogleSheets, 7000);
     return () => clearInterval(pollInterval);
-  }, [transactions]);
+  }, []);
 
 
 
@@ -613,6 +776,36 @@ export default function App() {
     localStorage.setItem('supply_anesth_staff_name', currentStaffName);
   }, [currentStaffName]);
 
+  const handleChangeDeviceName = () => {
+    Swal.fire({
+      title: 'เปลี่ยนชื่อเครื่องคอมพิวเตอร์',
+      text: 'ระบุชื่อเครื่องที่ใช้อยู่ เช่น PC-OR01-ANESTH',
+      input: 'text',
+      inputValue: deviceName,
+      showCancelButton: true,
+      confirmButtonText: 'บันทึก',
+      cancelButtonText: 'ยกเลิก',
+      confirmButtonColor: '#10b981',
+      cancelButtonColor: '#ef4444',
+      inputValidator: (value) => {
+        if (!value) {
+          return 'กรุณาระบุชื่อเครื่อง';
+        }
+      }
+    }).then((result) => {
+      if (result.isConfirmed) {
+        setDeviceName(result.value.toUpperCase());
+        Swal.fire({
+          title: 'เปลี่ยนชื่อเครื่องสำเร็จ',
+          text: `ชื่อเครื่องใหม่คือ: ${result.value.toUpperCase()}`,
+          icon: 'success',
+          confirmButtonText: 'ตกลง',
+          confirmButtonColor: '#10b981'
+        });
+      }
+    });
+  };
+
   // --- Real-time Sync & Broadcast channel logic ---
   const isRemoteSyncRef = React.useRef(false);
 
@@ -668,6 +861,139 @@ export default function App() {
       console.error('Failed to broadcast sync:', e);
     }
   }, [drugs, transactions, deviceName]);
+
+  // Firebase Real-time Sync for Drugs
+  useEffect(() => {
+    const drugsColRef = collection(db, 'drugs');
+    const unsubscribe = onSnapshot(drugsColRef, async (snapshot) => {
+      if (snapshot.empty) {
+        // First-time setup: initialize Firestore with DEFAULT_DRUGS
+        const batch = writeBatch(db);
+        DEFAULT_DRUGS.forEach((drug) => {
+          const dRef = doc(db, 'drugs', drug.id);
+          batch.set(dRef, drug);
+        });
+        await batch.commit();
+        return;
+      }
+
+      const loadedDrugs: Drug[] = [];
+      snapshot.forEach((d) => {
+        loadedDrugs.push(d.data() as Drug);
+      });
+
+      // Maintain order consistent with DEFAULT_DRUGS
+      const orderMap = DEFAULT_DRUGS.reduce((acc, drug, idx) => {
+        acc[drug.id] = idx;
+        return acc;
+      }, {} as Record<string, number>);
+
+      loadedDrugs.sort((a, b) => {
+        const orderA = orderMap[a.id] !== undefined ? orderMap[a.id] : 9999;
+        const orderB = orderMap[b.id] !== undefined ? orderMap[b.id] : 9999;
+        return orderA - orderB;
+      });
+
+      setDrugs(loadedDrugs);
+    }, (error) => {
+      console.error("Firebase Sync Error (Drugs):", error);
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  // Firebase Real-time Sync for Transactions
+  useEffect(() => {
+    const txColRef = collection(db, 'transactions');
+    const unsubscribe = onSnapshot(txColRef, async (snapshot) => {
+      if (snapshot.empty) {
+        // First-time setup: initialize Firestore with INITIAL_TRANSACTIONS
+        const batch = writeBatch(db);
+        INITIAL_TRANSACTIONS.forEach((tx) => {
+          const tRef = doc(db, 'transactions', tx.id);
+          batch.set(tRef, tx);
+        });
+        await batch.commit();
+        return;
+      }
+
+      const loadedTxs: Transaction[] = [];
+      const seenIds = new Set<string>();
+      snapshot.forEach((d) => {
+        const tx = d.data() as Transaction;
+        if (!tx.id) return;
+        if (seenIds.has(tx.id)) {
+          console.warn(`Duplicate transaction ID found in Firestore snapshot: ${tx.id}. Skipping.`);
+          return;
+        }
+        seenIds.add(tx.id);
+        loadedTxs.push({
+          ...tx,
+          coldBox: tx.coldBox || 'ไม่เบิก',
+          roomTempBox: tx.roomTempBox || 'ไม่เบิก',
+          coldOrRoomTempBox: tx.coldOrRoomTempBox || (tx.coldBox === 'เบิก' || tx.roomTempBox === 'เบิก' ? 'เบิก' : (tx.type === 'เบิก' ? 'ไม่เบิก' : 'ไม่ได้เบิก')),
+          notes: tx.notes || ''
+        });
+      });
+
+      // Sort by timestamp descending
+      loadedTxs.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+      setTransactions((prev) => {
+        // If it's the first load, don't show notifications for historical items
+        if (prev.length === 0) {
+          return loadedTxs;
+        }
+
+        // Find transactions that are new compared to our current state
+        const filteredNew = loadedTxs.filter(newTx => !prev.some(p => p.id === newTx.id));
+
+        if (filteredNew.length > 0) {
+          // Identify transactions recorded by other devices
+          const remoteNew = filteredNew.filter(tx => tx.deviceName !== deviceName);
+
+          if (remoteNew.length > 0) {
+            const newIds = remoteNew.map(tx => tx.id);
+            setHighlightedTxIds(prevHighlighted => {
+              const updated = new Set(prevHighlighted);
+              newIds.forEach(id => updated.add(id));
+              return updated;
+            });
+
+            // Clear highlights after 4 seconds
+            setTimeout(() => {
+              setHighlightedTxIds(prevHighlighted => {
+                const updated = new Set(prevHighlighted);
+                newIds.forEach(id => updated.delete(id));
+                return updated;
+              });
+            }, 4000);
+
+            // Push a toast notice
+            const Toast = Swal.mixin({
+              toast: true,
+              position: 'top-end',
+              showConfirmButton: false,
+              timer: 4000,
+              timerProgressBar: true
+            });
+
+            Toast.fire({
+              icon: 'info',
+              title: `พบข้อมูลเบิกจ่ายยาใหม่จากระบบส่วนกลาง (${remoteNew.length} รายการ)`,
+              text: `อัปเดตตารางและปรับยอดคงเหลือเรียลไทม์`
+            });
+          }
+        }
+
+        return loadedTxs;
+      });
+    }, (error) => {
+      console.error("Firebase Sync Error (Transactions):", error);
+    });
+
+    return () => unsubscribe();
+  }, [deviceName]);
 
   // Resolve conflict handler
   const handleResolveConflict = (resolution: 'merge' | 'use_remote' | 'override_server') => {
@@ -796,8 +1122,27 @@ export default function App() {
       cancelButtonText: 'ยกเลิก',
       confirmButtonColor: '#e11d48',
       cancelButtonColor: '#4b5563',
-    }).then((result) => {
+    }).then(async (result) => {
       if (result.isConfirmed) {
+        // Reset in Firestore
+        try {
+          const batch = writeBatch(db);
+          // Delete all current drugs and reset to DEFAULT_DRUGS
+          drugs.forEach((d) => {
+            batch.delete(doc(db, 'drugs', d.id));
+          });
+          DEFAULT_DRUGS.forEach((d) => {
+            batch.set(doc(db, 'drugs', d.id), d);
+          });
+          // Delete all current transactions
+          transactions.forEach((tx) => {
+            batch.delete(doc(db, 'transactions', tx.id));
+          });
+          await batch.commit();
+        } catch (fError) {
+          console.error("Firestore Reset Error:", fError);
+        }
+
         // Reset drugs back to DEFAULT_DRUGS
         setDrugs(DEFAULT_DRUGS);
         localStorage.setItem('supply_anesth_drugs', JSON.stringify(DEFAULT_DRUGS));
@@ -1145,7 +1490,7 @@ export default function App() {
 
     // Create Transaction Record
     const newTx: Transaction = {
-      id: `tx-${Date.now()}`,
+      id: `tx-${Date.now()}-${Math.floor(Math.random() * 1000000)}`,
       timestamp: new Date().toISOString(),
       type: txType,
       orRoom,
@@ -1200,7 +1545,8 @@ export default function App() {
               'orRoom': newTx.orRoom,
               'blockBox': newTx.blockBox,
               'extraBox': newTx.extraBox,
-              'coldOrRoomTempBox': newTx.coldOrRoomTempBox
+              'coldOrRoomTempBox': newTx.coldOrRoomTempBox,
+              'deviceName': newTx.deviceName
             });
           });
         } else {
@@ -1221,7 +1567,8 @@ export default function App() {
             'orRoom': newTx.orRoom,
             'blockBox': newTx.blockBox,
             'extraBox': newTx.extraBox,
-            'coldOrRoomTempBox': newTx.coldOrRoomTempBox
+            'coldOrRoomTempBox': newTx.coldOrRoomTempBox,
+            'deviceName': newTx.deviceName
           });
         }
       } else {
@@ -1246,7 +1593,8 @@ export default function App() {
               'blockBox': newTx.blockBox,
               'extraBox': newTx.extraBox,
               'coldOrRoomTempBox': newTx.coldOrRoomTempBox,
-              'notes': newTx.notes || '-'
+              'notes': newTx.notes || '-',
+              'deviceName': newTx.deviceName
             });
           });
         } else {
@@ -1269,7 +1617,8 @@ export default function App() {
             'blockBox': newTx.blockBox,
             'extraBox': newTx.extraBox,
             'coldOrRoomTempBox': newTx.coldOrRoomTempBox,
-            'notes': newTx.notes || '-'
+            'notes': newTx.notes || '-',
+            'deviceName': newTx.deviceName
           });
         }
       }
@@ -1282,6 +1631,28 @@ export default function App() {
 
       // Perform direct POST request
       await sendPOST(appsScriptUrl, payload);
+
+      // Save to Firebase Firestore in real-time
+      try {
+        const txRef = doc(db, 'transactions', newTx.id);
+        await setDoc(txRef, newTx);
+
+        const batch = writeBatch(db);
+        Object.keys(selectedMedications).forEach((drugId) => {
+          const qty = selectedMedications[drugId];
+          if (qty > 0) {
+            const drugItem = drugs.find(d => d.id === drugId);
+            if (drugItem) {
+              const updatedStock = Math.max(0, drugItem.stock + (txType === 'เบิก' ? -qty : qty));
+              const drugRef = doc(db, 'drugs', drugId);
+              batch.update(drugRef, { stock: updatedStock });
+            }
+          }
+        });
+        await batch.commit();
+      } catch (fError) {
+        console.error("Failed to write to Firestore in real-time:", fError);
+      }
 
       // 2. Process locally: Update stock numbers
       setDrugs(prevDrugs => {
@@ -1299,7 +1670,10 @@ export default function App() {
       });
 
       // 3. Append Transaction to state
-      setTransactions(prevTxs => [newTx, ...prevTxs]);
+      setTransactions(prevTxs => {
+        const combined = [newTx, ...prevTxs];
+        return Array.from(new Map(combined.map(t => [t.id, t])).values());
+      });
       setSelfAddedTxId(newTx.id);
       setHighlightedTxIds(prev => {
         const next = new Set(prev);
@@ -1334,6 +1708,29 @@ export default function App() {
 
     } catch (err: any) {
       console.error('Error saving to Google Sheets:', err);
+
+      // Save to Firebase Firestore as fallback
+      try {
+        const txRef = doc(db, 'transactions', newTx.id);
+        await setDoc(txRef, newTx);
+
+        const batch = writeBatch(db);
+        Object.keys(selectedMedications).forEach((drugId) => {
+          const qty = selectedMedications[drugId];
+          if (qty > 0) {
+            const drugItem = drugs.find(d => d.id === drugId);
+            if (drugItem) {
+              const updatedStock = Math.max(0, drugItem.stock + (txType === 'เบิก' ? -qty : qty));
+              const drugRef = doc(db, 'drugs', drugId);
+              batch.update(drugRef, { stock: updatedStock });
+            }
+          }
+        });
+        await batch.commit();
+      } catch (fError) {
+        console.error("Failed to write to Firestore as fallback:", fError);
+      }
+
       // Even if network fails in the preview runtime, we will save locally so it works beautifully in-app!
       setDrugs(prevDrugs => {
         return prevDrugs.map(drug => {
@@ -1348,7 +1745,10 @@ export default function App() {
           return drug;
         });
       });
-      setTransactions(prevTxs => [newTx, ...prevTxs]);
+      setTransactions(prevTxs => {
+        const combined = [newTx, ...prevTxs];
+        return Array.from(new Map(combined.map(t => [t.id, t])).values());
+      });
       setSelfAddedTxId(newTx.id);
       setHighlightedTxIds(prev => {
         const next = new Set(prev);
@@ -1484,7 +1884,8 @@ export default function App() {
           'ActualUsed': usedVal,
           'Wastage': wasteVal,
           'UseMode': drug.useMode === 'full' ? 'เต็มแอมป์/เต็มขวด' : 'ใช้บางส่วน',
-          'notes': notes.trim() ? `[ยาควบคุมพิเศษ] ${notes.trim()}` : '[ยาควบคุมพิเศษ]'
+          'notes': notes.trim() ? `[ยาควบคุมพิเศษ] ${notes.trim()}` : '[ยาควบคุมพิเศษ]',
+          'deviceName': newTx.deviceName
         });
       });
     });
@@ -1517,6 +1918,34 @@ export default function App() {
 
       // Perform direct POST request
       await sendPOST(appsScriptUrl, payload);
+
+      // Save special controlled transactions and update drug stocks in Firestore
+      try {
+        const batch = writeBatch(db);
+        localTxEntries.forEach((tx) => {
+          const txRef = doc(db, 'transactions', tx.id);
+          batch.set(txRef, tx);
+        });
+
+        drugs.forEach((drug) => {
+          let totalAmpsUsed = 0;
+          controlledCases.forEach(c => {
+            c.drugs.forEach(d => {
+              if (mapSpecialDrugToCabinetDrugId(d.drugName) === drug.id) {
+                totalAmpsUsed += d.ampsCount;
+              }
+            });
+          });
+          if (totalAmpsUsed > 0) {
+            const drugRef = doc(db, 'drugs', drug.id);
+            batch.update(drugRef, { stock: Math.max(0, drug.stock - totalAmpsUsed) });
+          }
+        });
+
+        await batch.commit();
+      } catch (fError) {
+        console.error("Failed to write controlled transactions to Firestore:", fError);
+      }
 
       // Decrement stock based on ampsCount
       setDrugs(prevDrugs => {
@@ -1552,7 +1981,10 @@ export default function App() {
       });
 
       // Process locally: append to transaction feed
-      setTransactions(prevTxs => [...localTxEntries, ...prevTxs]);
+      setTransactions(prevTxs => {
+        const combined = [...localTxEntries, ...prevTxs];
+        return Array.from(new Map(combined.map(t => [t.id, t])).values());
+      });
       if (localTxEntries.length > 0) {
         setLastSubmittedTx(localTxEntries[0]);
         setSelfAddedTxId(localTxEntries[0].id);
@@ -1588,6 +2020,34 @@ export default function App() {
     } catch (err: any) {
       console.error('Error saving controlled drugs to Google Sheets:', err);
       
+      // Save special controlled transactions and update drug stocks in Firestore as fallback
+      try {
+        const batch = writeBatch(db);
+        localTxEntries.forEach((tx) => {
+          const txRef = doc(db, 'transactions', tx.id);
+          batch.set(txRef, tx);
+        });
+
+        drugs.forEach((drug) => {
+          let totalAmpsUsed = 0;
+          controlledCases.forEach(c => {
+            c.drugs.forEach(d => {
+              if (mapSpecialDrugToCabinetDrugId(d.drugName) === drug.id) {
+                totalAmpsUsed += d.ampsCount;
+              }
+            });
+          });
+          if (totalAmpsUsed > 0) {
+            const drugRef = doc(db, 'drugs', drug.id);
+            batch.update(drugRef, { stock: Math.max(0, drug.stock - totalAmpsUsed) });
+          }
+        });
+
+        await batch.commit();
+      } catch (fError) {
+        console.error("Failed to write controlled transactions to Firestore in fallback:", fError);
+      }
+      
       // Fallback local save if network is offline
       setDrugs(prevDrugs => {
         return prevDrugs.map(drug => {
@@ -1620,7 +2080,10 @@ export default function App() {
         return updated;
       });
 
-      setTransactions(prevTxs => [...localTxEntries, ...prevTxs]);
+      setTransactions(prevTxs => {
+        const combined = [...localTxEntries, ...prevTxs];
+        return Array.from(new Map(combined.map(t => [t.id, t])).values());
+      });
       if (localTxEntries.length > 0) {
         setLastSubmittedTx(localTxEntries[0]);
         setSelfAddedTxId(localTxEntries[0].id);
@@ -1654,7 +2117,7 @@ export default function App() {
   };
 
   // --- Admin Stock Actions ---
-  const handleAddNewDrug = (e: React.FormEvent) => {
+  const handleAddNewDrug = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newDrugName.trim()) {
       Swal.fire({
@@ -1667,14 +2130,19 @@ export default function App() {
     }
 
     const newDrug: Drug = {
-      id: `custom-${Date.now()}`,
+      id: `custom-${Date.now()}-${Math.floor(Math.random() * 1000000)}`,
       name: newDrugName.trim(),
       category: newDrugCategory,
       stock: newDrugStock,
       unit: newDrugUnit.trim() || 'amp'
     };
 
-    setDrugs(prev => [...prev, newDrug]);
+    try {
+      await setDoc(doc(db, 'drugs', newDrug.id), newDrug);
+    } catch (fError) {
+      console.error("Firestore Add Drug Error:", fError);
+      setDrugs(prev => [...prev, newDrug]); // offline fallback
+    }
     setNewDrugName('');
     setNewDrugStock(50);
     setNewDrugUnit('amp');
@@ -1688,7 +2156,7 @@ export default function App() {
     });
   };
 
-  const handleDeleteDrug = (id: string) => {
+  const handleDeleteDrug = async (id: string) => {
     const targetDrug = drugs.find(d => d.id === id);
     if (!targetDrug) return;
 
@@ -1701,9 +2169,14 @@ export default function App() {
       cancelButtonText: 'ยกเลิก',
       confirmButtonColor: '#e11d48',
       cancelButtonColor: '#4b5563',
-    }).then((result) => {
+    }).then(async (result) => {
       if (result.isConfirmed) {
-        setDrugs(prev => prev.filter(drug => drug.id !== id));
+        try {
+          await deleteDoc(doc(db, 'drugs', id));
+        } catch (fError) {
+          console.error("Firestore Delete Drug Error:", fError);
+          setDrugs(prev => prev.filter(drug => drug.id !== id)); // offline fallback
+        }
         
         // Auto-refresh: remove from selected medications queue
         setSelectedMedications(prev => {
@@ -1735,7 +2208,7 @@ export default function App() {
     setEditingDrugUnit(drug.unit);
   };
 
-  const handleSaveDrugEdit = () => {
+  const handleSaveDrugEdit = async () => {
     if (!editingDrugName.trim()) {
       Swal.fire({
         title: 'คำเตือน!',
@@ -1745,18 +2218,24 @@ export default function App() {
       });
       return;
     }
-    setDrugs(prev => prev.map(drug => {
-      if (drug.id === editingDrugId) {
-        return {
-          ...drug,
-          name: editingDrugName.trim(),
-          category: editingDrugCategory,
-          stock: editingDrugStock,
-          unit: editingDrugUnit.trim() || 'amp'
-        };
+    
+    const updatedDrug: Drug = {
+      id: editingDrugId || '',
+      name: editingDrugName.trim(),
+      category: editingDrugCategory,
+      stock: editingDrugStock,
+      unit: editingDrugUnit.trim() || 'amp'
+    };
+
+    if (editingDrugId) {
+      try {
+        await setDoc(doc(db, 'drugs', editingDrugId), updatedDrug);
+      } catch (fError) {
+        console.error("Firestore Edit Drug Error:", fError);
+        setDrugs(prev => prev.map(drug => drug.id === editingDrugId ? updatedDrug : drug)); // offline fallback
       }
-      return drug;
-    }));
+    }
+    
     setEditingDrugId(null);
 
     Swal.fire({
@@ -1777,32 +2256,37 @@ export default function App() {
     setStockEditVal(currentVal);
   };
 
-  const handleSaveStockEdit = (id: string) => {
-    setDrugs(prev => prev.map(drug => {
-      if (drug.id === id) {
-        return { ...drug, stock: stockEditVal };
-      }
-      return drug;
-    }));
+  const handleSaveStockEdit = async (id: string) => {
+    try {
+      await updateDoc(doc(db, 'drugs', id), { stock: stockEditVal });
+    } catch (fError) {
+      console.error("Firestore Save Stock Error:", fError);
+      setDrugs(prev => prev.map(drug => drug.id === id ? { ...drug, stock: stockEditVal } : drug)); // offline fallback
+    }
     setStockEditId(null);
   };
 
-  const handleAdjustStock = (id: string, amount: number) => {
-    setDrugs(prev => prev.map(drug => {
-      if (drug.id === id) {
-        return { ...drug, stock: Math.max(0, drug.stock + amount) };
+  const handleAdjustStock = async (id: string, amount: number) => {
+    const targetDrug = drugs.find(d => d.id === id);
+    if (targetDrug) {
+      const nextStock = Math.max(0, targetDrug.stock + amount);
+      try {
+        await updateDoc(doc(db, 'drugs', id), { stock: nextStock });
+      } catch (fError) {
+        console.error("Firestore Adjust Stock Error:", fError);
+        setDrugs(prev => prev.map(drug => drug.id === id ? { ...drug, stock: nextStock } : drug)); // offline fallback
       }
-      return drug;
-    }));
+    }
   };
 
-  const handleDirectStockChange = (id: string, value: number) => {
-    setDrugs(prev => prev.map(drug => {
-      if (drug.id === id) {
-        return { ...drug, stock: Math.max(0, value) };
-      }
-      return drug;
-    }));
+  const handleDirectStockChange = async (id: string, value: number) => {
+    const nextStock = Math.max(0, value);
+    try {
+      await updateDoc(doc(db, 'drugs', id), { stock: nextStock });
+    } catch (fError) {
+      console.error("Firestore Direct Stock Error:", fError);
+      setDrugs(prev => prev.map(drug => drug.id === id ? { ...drug, stock: nextStock } : drug)); // offline fallback
+    }
   };
 
   // --- Admin Filtered History ---
@@ -2345,6 +2829,32 @@ export default function App() {
               <p className="text-emerald-100 text-sm md:text-base font-light">
                 Supply Anesth-KKU • คณะแพทยศาสตร์ มหาวิทยาลัยขอนแก่น
               </p>
+              <div className="flex flex-wrap items-center justify-center md:justify-start gap-2 mt-2">
+                <span className="text-[10px] bg-emerald-950/40 text-emerald-100 border border-emerald-500/20 px-2 py-0.5 rounded-lg flex items-center gap-1">
+                  <span className="relative flex h-1.5 w-1.5">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-400"></span>
+                  </span>
+                  เครื่อง: <strong className="text-white font-mono">{deviceName}</strong>
+                  <button
+                    type="button"
+                    onClick={handleChangeDeviceName}
+                    className="ml-1 text-[9px] underline hover:text-white cursor-pointer"
+                  >
+                    เปลี่ยน
+                  </button>
+                </span>
+                
+                <span className="text-[10px] bg-emerald-950/40 text-emerald-100 border border-emerald-500/20 px-2 py-0.5 rounded-lg flex items-center gap-1">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400"></span>
+                  ฐานข้อมูล: <strong className="text-white">Firestore Real-time</strong>
+                </span>
+
+                <span className="text-[10px] bg-emerald-950/40 text-emerald-100 border border-emerald-500/20 px-2 py-0.5 rounded-lg flex items-center gap-1">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400"></span>
+                  คลังกลาง: <strong className="text-white">Google Sheets Active</strong>
+                </span>
+              </div>
             </div>
           </div>
           
@@ -3325,126 +3835,6 @@ export default function App() {
 
           </div>
         </form>
-
-        {/* Transaction History Section */}
-        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-4 mt-6">
-          <div className="border-b border-slate-100 pb-3 flex items-center justify-between">
-            <div>
-              <h3 className="text-lg font-bold text-slate-855 flex items-center gap-2">
-                <Calendar className="w-5 h-5 text-slate-750" />
-                ประวัติการเบิก-คืนยาล่าสุด (10 รายการล่าสุด)
-              </h3>
-              <p className="text-xs text-slate-500 mt-0.5">รายการความเคลื่อนไหวในคลังวิสัญญีล่าสุด</p>
-            </div>
-          </div>
-
-          <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
-            <table className="w-full text-sm text-left border-collapse">
-              <thead>
-                <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold uppercase tracking-wider text-xs">
-                  <th className="py-3 px-4">วัน-เวลา</th>
-                  <th className="py-3 px-4 text-center">ประเภท</th>
-                  <th className="py-3 px-4">ห้อง OR</th>
-                  <th className="py-3 px-4">ชื่อ-นามสกุล หรือ HN ผู้ป่วย</th>
-                  <th className="py-3 px-4">ผู้ดำเนินงาน</th>
-                  <th className="py-3 px-4 text-center">กล่อง Block</th>
-                  <th className="py-3 px-4 text-center">กล่อง Extra</th>
-                  <th className="py-3 px-4 text-center">กล่องเย็น/ห้อง</th>
-                  <th className="py-3 px-4">รายละเอียดการเบิก-คืนยา</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100 text-slate-700 text-xs">
-                {transactions.slice(0, 10).map(tx => (
-                  <tr 
-                    key={tx.id} 
-                    id={`tx-row-log-${tx.id}`} 
-                    className={`hover:bg-slate-50/40 align-top transition duration-150 ${
-                      highlightedTxIds.has(tx.id) 
-                        ? (tx.notes?.includes('[ยาควบคุมพิเศษ]') || tx.specialControlledDrugs?.length > 0 ? 'animate-row-flash-purple' : 'animate-row-flash-amber') 
-                        : ''
-                    }`}
-                  >
-                    <td className="py-3.5 px-4 font-mono text-slate-500 whitespace-nowrap">
-                      {new Date(tx.timestamp).toLocaleString('th-TH', {
-                        year: 'numeric',
-                        month: 'short',
-                        day: 'numeric',
-                        hour: '2-digit',
-                        minute: '2-digit'
-                      })}
-                    </td>
-                    <td className="py-3.5 px-4 text-center font-bold">
-                      <span className={`px-2.5 py-1 rounded-full text-[10px] ${
-                        tx.type === 'เบิก' 
-                          ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' 
-                          : 'bg-amber-50 text-amber-800 border border-amber-200'
-                      }`}>
-                        {tx.type}
-                      </span>
-                    </td>
-                    <td className="py-3.5 px-4 font-semibold text-slate-800">{tx.orRoom}</td>
-                    <td className="py-3.5 px-4 font-mono font-medium text-slate-700">{tx.patientHN}</td>
-                    <td className="py-3.5 px-4 text-slate-800">{tx.requesterName}</td>
-                    <td className="py-3.5 px-4 text-center font-medium">
-                      <span className={tx.blockBox === 'เบิก' || tx.blockBox === 'คืน' ? (tx.type === 'เบิก' ? 'text-emerald-600 font-bold' : 'text-amber-600 font-bold') : 'text-slate-400'}>
-                        {tx.blockBox}
-                      </span>
-                    </td>
-                    <td className="py-3.5 px-4 text-center font-medium">
-                      <span className={tx.extraBox === 'เบิก' || tx.extraBox === 'คืน' ? (tx.type === 'เบิก' ? 'text-emerald-600 font-bold' : 'text-amber-600 font-bold') : 'text-slate-400'}>
-                        {tx.extraBox}
-                      </span>
-                    </td>
-                    <td className="py-3.5 px-4 text-center font-medium">
-                      <span className={tx.coldOrRoomTempBox === 'เบิก' || tx.coldOrRoomTempBox === 'คืน' ? (tx.type === 'เบิก' ? 'text-emerald-600 font-bold' : 'text-amber-600 font-bold') : 'text-slate-400'}>
-                        {tx.coldOrRoomTempBox || 'ไม่ได้เบิก'}
-                      </span>
-                    </td>
-                    <td className="py-3.5 px-4 font-mono text-xs max-w-xs">
-                      {tx.items.length === 0 ? (
-                        <span className="text-slate-400 text-[10px] italic">ไม่มีตัวยาเบิกเพิ่ม</span>
-                      ) : (
-                        <div className="space-y-0.5">
-                          {tx.items.map((item, idx) => (
-                            <div key={idx} className="flex justify-between gap-1 text-slate-800">
-                              <span className="truncate">{item.name}</span>
-                              <span className="font-bold shrink-0 text-emerald-700 ml-2 font-mono">x{item.quantity}</span>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                      {tx.specialControlledDrugs && tx.specialControlledDrugs.length > 0 && (
-                        <div className="mt-1.5 border-t border-purple-100 pt-1.5 space-y-0.5 text-[10px] bg-purple-50/50 p-1 rounded border border-purple-100">
-                          <p className="font-bold text-purple-700 flex items-center gap-0.5">
-                            <Pill className="w-3 h-3 text-pink-500" /> ยาควบคุมพิเศษ:
-                          </p>
-                          {tx.specialControlledDrugs.map((item, idx) => (
-                            <div key={idx} className="flex justify-between gap-1 text-purple-950 font-medium">
-                              <span className="truncate">{item.name}</span>
-                              <span className="font-bold shrink-0 text-purple-700 ml-2 font-mono">{item.quantity} {item.unit}</span>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                      {tx.notes && (
-                        <div className="mt-1.5 text-[10px] text-slate-500 italic bg-slate-50 p-1 rounded border border-slate-100">
-                          หมายเหตุ: {tx.notes}
-                        </div>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-                {transactions.length === 0 && (
-                  <tr>
-                    <td colSpan={9} className="py-10 text-center text-slate-400">
-                      ยังไม่มีบันทึกประวัติการเบิก-คืนในระบบ
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
       </>
     )}
 
@@ -5129,7 +5519,14 @@ export default function App() {
                                       {tx.type}
                                     </span>
                                   </td>
-                                  <td className="py-4 px-4 font-bold text-slate-800">{tx.orRoom}</td>
+                                  <td className="py-4 px-4">
+                                    <div className="flex flex-col gap-1">
+                                      <span className="font-bold text-slate-800">{tx.orRoom}</span>
+                                      <span className="font-semibold text-slate-400 text-[9px] font-mono whitespace-nowrap bg-slate-50 border border-slate-150 px-1.5 py-0.5 rounded w-fit">
+                                        {tx.deviceName || 'PC-OR01-ANESTH'}
+                                      </span>
+                                    </div>
+                                  </td>
                                   <td className="py-4 px-4 font-mono font-medium text-slate-700 leading-relaxed max-w-[120px] truncate" title={tx.patientHN}>{tx.patientHN}</td>
                                   <td className="py-4 px-4 text-slate-800 font-medium">{tx.requesterName}</td>
                                   
