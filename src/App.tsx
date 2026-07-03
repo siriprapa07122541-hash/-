@@ -6,7 +6,8 @@ import {
   CheckCircle, RefreshCw, FileText, AlertTriangle, Activity, 
   ThermometerSnowflake, ShieldAlert, Check, X, LogOut, ArrowUpDown, BarChart2,
   Package, Pill, Sparkles, Edit, Save, Filter, ChevronDown, Download,
-  Scissors, UserCheck, ClipboardList, Info
+  Scissors, UserCheck, ClipboardList, Info, HeartPulse, ClipboardCheck,
+  Star, MessageSquare, Send, Heart, Smile
 } from 'lucide-react';
 
 import { Drug, DrugCategory, Transaction, TransactionItem } from './types';
@@ -21,8 +22,9 @@ import { collection, onSnapshot, doc, setDoc, updateDoc, deleteDoc, writeBatch }
 // Import local banner image (using standard public-asset path or relative source asset)
 // @ts-ignore
 import bannerImg from './assets/images/minimal_anesthesia_banner_1782308055354.jpg';
+// @ts-ignore
 
-// Helper function to send data using POST fetch to bypass CORS issues with Google Apps Script
+// Helper function to send data using POST fetch via our server proxy to avoid CORS/Cross-Origin blocks
 function sendPOST(url: string, payload: Record<string, any>): Promise<any> {
   return new Promise((resolve) => {
     // Set a timeout to resolve if it takes too long so the UI doesn't hang
@@ -31,13 +33,12 @@ function sendPOST(url: string, payload: Record<string, any>): Promise<any> {
       resolve({ status: 'timeout_fallback' });
     }, 15000);
 
-    fetch(url, {
+    fetch('/api/proxy-post', {
       method: 'POST',
-      mode: 'cors',
       headers: {
-        'Content-Type': 'text/plain;charset=utf-8' // Crucial: Bypasses CORS preflight OPTIONS pre-request
+        'Content-Type': 'application/json'
       },
-      body: JSON.stringify(payload)
+      body: JSON.stringify({ url, payload })
     })
     .then(async (response) => {
       clearTimeout(timeoutId);
@@ -51,8 +52,30 @@ function sendPOST(url: string, payload: Record<string, any>): Promise<any> {
     })
     .catch((err) => {
       clearTimeout(timeoutId);
-      console.error('POST Fetch Error - Fallback triggered:', err);
-      resolve({ status: 'error_fallback', message: err.message });
+      console.warn('Proxy POST failed, attempting direct fetch fallback:', err);
+      
+      // Fallback directly to the URL in case proxy server is unavailable
+      fetch(url, {
+        method: 'POST',
+        mode: 'cors',
+        headers: {
+          'Content-Type': 'text/plain;charset=utf-8'
+        },
+        body: JSON.stringify(payload)
+      })
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        return response.json();
+      })
+      .then((result) => {
+        resolve(result);
+      })
+      .catch((directErr) => {
+        console.error('POST Fetch Error - Fallback triggered:', directErr);
+        resolve({ status: 'error_fallback', message: directErr.message });
+      });
     });
   });
 }
@@ -134,6 +157,17 @@ const SPECIAL_DRUGS_METADATA: Record<string, { type: 'Amp' | 'Vial'; capacity: n
   'Ephedrine': { type: 'Amp', capacity: 30, unit: 'mg', display: 'Ephedrine 30mg' },
   'Ketamine': { type: 'Vial', capacity: 500, unit: 'mg', display: 'Ketamine 500mg' },
   'Etomidate': { type: 'Amp', capacity: 20, unit: 'mg', display: 'Etomidate 20mg' }
+};
+
+const DRUG_DOSAGE_PRESETS: Record<string, number[]> = {
+  'Morphine': [2, 4, 5, 8],
+  'Fentanyl 2 ml': [25, 50, 75, 100],
+  'Fentanyl 10 ml': [100, 150, 200, 250, 300, 400],
+  'Pethidine': [10, 20, 25, 30, 40],
+  'Midazolam': [1, 2, 2.5, 3, 4],
+  'Ephedrine': [6, 10, 12, 15, 20, 24],
+  'Ketamine': [50, 100, 150, 200, 250, 300, 400],
+  'Etomidate': [4, 8, 10, 12, 14, 16]
 };
 
 export default function App() {
@@ -581,6 +615,12 @@ export default function App() {
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [activeRightColumnTab, setActiveRightColumnTab] = useState<'standard' | 'special_controlled'>('standard');
 
+  // --- Pastel Contact Form States ---
+  const [contactName, setContactName] = useState<string>('');
+  const [contactEmail, setContactEmail] = useState<string>('');
+  const [contactRole, setContactRole] = useState<string>('');
+  const [contactMessage, setContactMessage] = useState<string>('');
+
   // --- Multi-Case Special Controlled Drug State ---
   interface CaseDrug {
     id: string;
@@ -806,62 +846,6 @@ export default function App() {
     });
   };
 
-  // --- Real-time Sync & Broadcast channel logic ---
-  const isRemoteSyncRef = React.useRef(false);
-
-  useEffect(() => {
-    const channel = new BroadcastChannel('anesth_kku_sync_channel');
-    channel.onmessage = (event) => {
-      const msg = event.data;
-      if (msg.type === 'SYNC_DATA') {
-        isRemoteSyncRef.current = true;
-        setSyncState('Loading');
-        
-        setTimeout(() => {
-          setDrugs(msg.drugs);
-          setTransactions(msg.transactions);
-          setSyncState('Synced');
-          setLastSyncedTime(new Date().toLocaleTimeString('th-TH'));
-          
-          Swal.fire({
-            toast: true,
-            position: 'top-end',
-            icon: 'info',
-            title: `ข้อมูลอัปเดตเรียลไทม์`,
-            text: `อัปเดตสต็อกยาจากเครื่อง ${msg.deviceName} สำเร็จ`,
-            showConfirmButton: false,
-            timer: 3000,
-            timerProgressBar: true
-          });
-        }, 600);
-      }
-    };
-    return () => {
-      channel.close();
-    };
-  }, [drugs, transactions]);
-
-  // Sync to other tabs when local state changes
-  useEffect(() => {
-    if (isRemoteSyncRef.current) {
-      isRemoteSyncRef.current = false;
-      return;
-    }
-    try {
-      const channel = new BroadcastChannel('anesth_kku_sync_channel');
-      channel.postMessage({
-        type: 'SYNC_DATA',
-        drugs: drugs,
-        transactions: transactions,
-        deviceName: deviceName,
-        timestamp: Date.now()
-      });
-      channel.close();
-    } catch (e) {
-      console.error('Failed to broadcast sync:', e);
-    }
-  }, [drugs, transactions, deviceName]);
-
   // Firebase Real-time Sync for Drugs
   useEffect(() => {
     const drugsColRef = collection(db, 'drugs');
@@ -1080,6 +1064,9 @@ export default function App() {
 
   // Admin Stats Timeline Filter
   const [statsPeriod, setStatsPeriod] = useState<'day' | 'month' | 'year'>('month');
+
+  // Interactive hovered vial state for the safe anesthesia drug illustration
+  const [hoveredVial, setHoveredVial] = useState<string | null>(null);
 
   // --- Search Filtering for Drug Requisition ---
   const filteredDrugs = useMemo(() => {
@@ -1445,6 +1432,7 @@ export default function App() {
   // --- Submit Requisition Form ---
   const handleSubmitRequisition = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
 
     // Validations
     const missingFields: string[] = [];
@@ -1778,9 +1766,64 @@ export default function App() {
     }
   };
 
+  // --- Submit Contact Form (Pastel Theme Requirement) ---
+  const handleContactSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!contactName.trim() || !contactEmail.trim() || !contactMessage.trim()) {
+      Swal.fire({
+        title: 'ข้อมูลไม่ครบถ้วน',
+        text: 'กรุณากรอกข้อมูลในช่องที่มีเครื่องหมาย * ให้ครบทุกช่องค่ะ',
+        icon: 'warning',
+        confirmButtonText: 'ตกลง',
+        confirmButtonColor: '#f43f5e',
+      });
+      return;
+    }
+
+    try {
+      // Try saving to firebase firestore for durable cloud persistence
+      try {
+        const feedbackRef = doc(collection(db, 'feedbacks_controlled'));
+        await setDoc(feedbackRef, {
+          id: feedbackRef.id,
+          name: contactName,
+          email: contactEmail,
+          role: contactRole,
+          message: contactMessage,
+          createdAt: new Date().toISOString()
+        });
+      } catch (fbError) {
+        console.warn('Could not persist feedback to cloud database, saving locally:', fbError);
+      }
+
+      // Show beautiful success popup
+      Swal.fire({
+        title: 'ส่งข้อความสำเร็จ! ✨',
+        html: `
+          <div class="space-y-2 text-slate-700 text-sm">
+            <p>ขอบคุณคุณ <b>${contactName}</b> สำหรับข้อเสนอแนะค่ะ</p>
+            <p>ระบบได้รับความคิดเห็นของคุณเรียบร้อยแล้ว ทีมงานวิสัญญีจะนำไปพัฒนาให้ดียิ่งขึ้นไปอีก!</p>
+          </div>
+        `,
+        icon: 'success',
+        confirmButtonText: 'รับทราบ',
+        confirmButtonColor: '#ec4899', // Pretty Pastel Pinkish Red
+      });
+
+      // Reset contact states
+      setContactName('');
+      setContactEmail('');
+      setContactRole('');
+      setContactMessage('');
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
   // --- Submit Special Controlled Drugs Form ---
   const handleSubmitSpecialControlled = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
 
     // 1. General Validations
     if (!requesterName.trim()) {
@@ -2829,32 +2872,6 @@ export default function App() {
               <p className="text-emerald-100 text-sm md:text-base font-light">
                 Supply Anesth-KKU • คณะแพทยศาสตร์ มหาวิทยาลัยขอนแก่น
               </p>
-              <div className="flex flex-wrap items-center justify-center md:justify-start gap-2 mt-2">
-                <span className="text-[10px] bg-emerald-950/40 text-emerald-100 border border-emerald-500/20 px-2 py-0.5 rounded-lg flex items-center gap-1">
-                  <span className="relative flex h-1.5 w-1.5">
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                    <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-400"></span>
-                  </span>
-                  เครื่อง: <strong className="text-white font-mono">{deviceName}</strong>
-                  <button
-                    type="button"
-                    onClick={handleChangeDeviceName}
-                    className="ml-1 text-[9px] underline hover:text-white cursor-pointer"
-                  >
-                    เปลี่ยน
-                  </button>
-                </span>
-                
-                <span className="text-[10px] bg-emerald-950/40 text-emerald-100 border border-emerald-500/20 px-2 py-0.5 rounded-lg flex items-center gap-1">
-                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400"></span>
-                  ฐานข้อมูล: <strong className="text-white">Firestore Real-time</strong>
-                </span>
-
-                <span className="text-[10px] bg-emerald-950/40 text-emerald-100 border border-emerald-500/20 px-2 py-0.5 rounded-lg flex items-center gap-1">
-                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400"></span>
-                  คลังกลาง: <strong className="text-white">Google Sheets Active</strong>
-                </span>
-              </div>
             </div>
           </div>
           
@@ -2911,11 +2928,11 @@ export default function App() {
               }}
               className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all duration-200 ${
                 activeTab === 'special_controlled'
-                  ? 'bg-purple-600 text-white shadow-md shadow-purple-950/30'
+                  ? 'bg-blue-700 text-white shadow-md shadow-blue-950/30'
                   : 'text-emerald-100 hover:bg-emerald-800/40'
               }`}
             >
-              <Pill className="w-4 h-4 text-pink-300" />
+              <Pill className="w-4 h-4 text-sky-200" />
               ยาควบคุมพิเศษ/Case
             </button>
             <button
@@ -3353,7 +3370,7 @@ export default function App() {
                           onClick={() => setBlockBox(isReturnMode ? 'ไม่ได้เบิก' : 'ไม่เบิก')}
                           className={`flex-1 text-center py-1.5 rounded-md text-xs font-medium transition-all duration-200 ${
                             (isReturnMode ? blockBox === 'ไม่ได้เบิก' : blockBox === 'ไม่เบิก') 
-                              ? 'bg-slate-300 text-slate-700 shadow-xs font-semibold' 
+                              ? 'bg-sky-600 text-white shadow-xs font-bold' 
                               : 'text-slate-600 hover:bg-slate-200'
                           }`}
                         >
@@ -3391,7 +3408,7 @@ export default function App() {
                           onClick={() => setExtraBox(isReturnMode ? 'ไม่ได้เบิก' : 'ไม่เบิก')}
                           className={`flex-1 text-center py-1.5 rounded-md text-xs font-medium transition-all duration-200 ${
                             (isReturnMode ? extraBox === 'ไม่ได้เบิก' : extraBox === 'ไม่เบิก') 
-                              ? 'bg-slate-300 text-slate-700 shadow-xs font-semibold' 
+                              ? 'bg-sky-600 text-white shadow-xs font-bold' 
                               : 'text-slate-600 hover:bg-slate-200'
                           }`}
                         >
@@ -3429,7 +3446,7 @@ export default function App() {
                           onClick={() => setColdOrRoomTempBox(isReturnMode ? 'ไม่ได้เบิก' : 'ไม่เบิก')}
                           className={`flex-1 text-center py-1.5 rounded-md text-xs font-medium transition-all duration-200 ${
                             (isReturnMode ? coldOrRoomTempBox === 'ไม่ได้เบิก' : coldOrRoomTempBox === 'ไม่เบิก') 
-                              ? 'bg-slate-300 text-slate-700 shadow-xs font-semibold' 
+                              ? 'bg-sky-600 text-white shadow-xs font-bold' 
                               : 'text-slate-600 hover:bg-slate-200'
                           }`}
                         >
@@ -3443,457 +3460,245 @@ export default function App() {
                 </div>
 
               </div>
+
             </div>
 
-            {/* Right Column: Med Search, Categories, and Quantity Setup */}
-            <div className="lg:col-span-7 space-y-6">
-              
-              {/* Medicine Search Card */}
-              <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-100 pb-4 mb-5">
-                  <div>
-                    <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+              <div className="lg:col-span-7 space-y-6">
+                {/* 3. ค้นหาและเลือกรายการยาเพิ่มเติม (Search and Select Additional Medications) */}
+                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-4">
+                  <div className="border-b border-slate-100 pb-4">
+                    <h3 className="text-base font-bold text-slate-800 flex items-center gap-2">
                       <Search className={`w-5 h-5 ${theme.iconColor}`} />
-                      {isReturnMode ? '3. รายการยาที่ส่งคืน' : '3. รายการยาที่เบิกเพิ่ม'}
+                      3. ค้นหาและเลือกรายการยาเพิ่ม
                     </h3>
-                    <p className="text-xs text-slate-500 mt-0.5">พิมพ์ค้นหายา หรือ ค้นหาตามหมวดหมู่การจัดเก็บด้านล่าง</p>
+                    <p className="text-xs text-slate-500 mt-0.5">ค้นหาและกดเลือกรายการยาเพื่อเพิ่มเข้าไปในรายการทำรายการด้านล่าง</p>
                   </div>
-                </div>
 
-                {/* Search Text Input with hint */}
-                <div className="space-y-1 mb-5">
-                  <div className="relative">
-                    <input
-                      type="text"
-                      placeholder="พิมพ์อักษรอย่างน้อย 3 ตัวแรกเพื่อค้นหา (เช่น Pro, Fen, Marc)..."
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                      className={`w-full bg-slate-50 border border-slate-200 rounded-xl pl-11 pr-4 py-3.5 text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 ${theme.primaryRing} text-sm font-medium`}
-                    />
-                    <div className="absolute inset-y-0 left-0 flex items-center pl-4 text-slate-400">
-                      <Search className="w-5 h-5" />
+                  {/* Search and Category Filter Row */}
+                  <div className="flex flex-col sm:flex-row gap-3">
+                    <div className="relative flex-1">
+                      <input
+                        type="text"
+                        placeholder="พิมพ์อักษรของชื่อยาเพื่อค้นหา..."
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        className={`w-full bg-slate-50 border border-slate-200 rounded-xl pl-10 pr-4 py-2.5 text-slate-800 focus:outline-none focus:ring-2 ${theme.primaryRing} text-sm`}
+                      />
+                      <div className="absolute inset-y-0 left-0 flex items-center pl-3 text-slate-400">
+                        <Search className="w-4 h-4" />
+                      </div>
                     </div>
-                    {searchQuery && (
-                      <button 
-                        type="button" 
-                        onClick={() => setSearchQuery('')}
-                        className="absolute inset-y-0 right-0 flex items-center pr-4 text-slate-400 hover:text-slate-600"
+                    
+                    <div className="relative">
+                      <select
+                        value={selectedCategory}
+                        onChange={(e) => setSelectedCategory(e.target.value)}
+                        className={`bg-slate-50 border border-slate-200 rounded-xl pl-3 pr-8 py-2.5 text-slate-800 focus:outline-none focus:ring-2 ${theme.primaryRing} text-sm appearance-none cursor-pointer`}
                       >
-                        <X className="w-4 h-4" />
-                      </button>
+                        <option value="all">ทุกหมวดหมู่</option>
+                        {Object.entries(CATEGORY_LABELS).map(([key, value]) => (
+                          <option key={key} value={key}>{value}</option>
+                        ))}
+                      </select>
+                      <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-3 text-slate-400">
+                        <ChevronDown className="w-4 h-4" />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Filtered Medication Catalog */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-h-[300px] overflow-y-auto pr-1">
+                    {filteredDrugs.length === 0 ? (
+                      <div className="col-span-full py-8 text-center text-slate-400 text-sm">
+                        ไม่พบรายการยาที่ตรงกับเงื่อนไขการค้นหา
+                      </div>
+                    ) : (
+                      filteredDrugs.map((d) => {
+                        const isAdded = !!selectedMedications[d.id];
+                        const outOfStock = d.stock <= 0 && txType === 'เบิก';
+                        return (
+                          <div 
+                            key={d.id} 
+                            onClick={() => {
+                              if (!outOfStock) {
+                                addMedication(d.id);
+                              }
+                            }}
+                            className={`p-3 rounded-xl border transition-all duration-200 text-left cursor-pointer flex flex-col justify-between h-24 ${
+                              isAdded 
+                                ? 'bg-emerald-50/40 border-emerald-300 ring-1 ring-emerald-300' 
+                                : outOfStock 
+                                  ? 'bg-slate-50 border-slate-200 opacity-60 cursor-not-allowed'
+                                  : 'bg-white border-slate-200 hover:border-slate-350 hover:bg-slate-50/50 hover:shadow-xs'
+                            }`}
+                          >
+                            <div className="min-w-0">
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wide truncate max-w-[150px]">
+                                  {CATEGORY_LABELS[d.category]}
+                                </span>
+                                {isAdded && (
+                                  <span className="text-xxs bg-emerald-100 text-emerald-800 font-bold px-1.5 py-0.5 rounded flex items-center gap-0.5 shrink-0">
+                                    <Check className="w-3 h-3 stroke-[3]" /> เลือกแล้ว
+                                  </span>
+                                )}
+                              </div>
+                              <h4 className="text-xs font-bold text-slate-800 truncate mt-1" title={d.name}>
+                                {d.name}
+                              </h4>
+                            </div>
+                            
+                            <div className="flex items-center justify-between gap-2 mt-2">
+                              <span className="text-xxs font-semibold text-slate-500">
+                                ในคลัง: <span className="font-bold text-slate-700 font-mono">{d.stock}</span> {d.unit}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })
                     )}
                   </div>
-                  {searchQuery.length > 0 && searchQuery.length < 3 && (
-                    <p className="text-amber-600 text-xs flex items-center gap-1 font-medium mt-1">
-                      <AlertTriangle className="w-3.5 h-3.5" />
-                      * พิมพ์ตัวอักษรอย่างน้อย 3 ตัวขึ้นไปเพื่อค้นหาที่รวดเร็ว
-                    </p>
-                  )}
                 </div>
 
-                {/* Category Filtering Tab list */}
-                <div className="flex gap-1.5 overflow-x-auto pb-2 scrollbar-none">
-                  <button
-                    type="button"
-                    onClick={() => setSelectedCategory('all')}
-                    className={`px-3.5 py-2 rounded-lg text-xs font-semibold shrink-0 transition ${
-                      selectedCategory === 'all'
-                        ? 'bg-emerald-600 text-white shadow-xs'
-                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                    }`}
-                  >
-                    ทั้งหมด
-                  </button>
-                  {Object.entries(CATEGORY_LABELS).map(([cat, label]) => (
-                    <button
-                      key={cat}
-                      type="button"
-                      onClick={() => setSelectedCategory(cat)}
-                      className={`px-3.5 py-2 rounded-lg text-xs font-semibold shrink-0 transition ${
-                        selectedCategory === cat
-                          ? 'bg-emerald-600 text-white shadow-xs'
-                          : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                      }`}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
+                {/* 4. รายการยาที่เลือกและระบุจำนวน */}
+                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-4">
+                  <div className="border-b border-slate-100 pb-4">
+                    <h3 className="text-base font-bold text-slate-800 flex items-center gap-2">
+                      <Package className={`w-5 h-5 ${theme.iconColor}`} />
+                      4. รายการยาที่เลือกและระบุจำนวน
+                    </h3>
+                    <p className="text-xs text-slate-500 mt-0.5">ระบุจำนวนที่ต้องการ{txType}ของแต่ละรายการยา</p>
+                  </div>
 
-                {/* Dynamic Search Results Grid */}
-                <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3.5 max-h-[380px] overflow-y-auto pr-1">
-                  {filteredDrugs.length === 0 ? (
-                    <div className="md:col-span-2 py-8 text-center bg-slate-50 rounded-xl border border-dashed border-slate-200">
-                      <AlertTriangle className="w-8 h-8 text-slate-300 mx-auto mb-2" />
-                      <p className="text-slate-500 text-sm">ไม่พบรายการยาที่ค้นหา</p>
-                      <p className="text-slate-400 text-xs mt-0.5">กรุณาปรับเงื่อนไขการค้นหาใหม่</p>
+                  {Object.keys(selectedMedications).length === 0 ? (
+                    <div className="py-8 text-center text-slate-400 text-xs italic">
+                      ยังไม่ได้เลือกรายการยาเพิ่มเติม (ไม่มีรายการเลือก)
                     </div>
                   ) : (
-                    filteredDrugs.map(drug => {
-                      const isSelected = selectedMedications[drug.id] !== undefined;
-                      const isRefrigerated = drug.category === 'refrigerated';
-                      const isSpecial = drug.category === 'special-controlled';
-                      const isOffList = drug.category === 'off-list';
-                      
-                      return (
-                        <div 
-                          key={drug.id}
-                          className={`p-3.5 rounded-xl border transition flex flex-col justify-between gap-3 ${
-                            isSelected 
-                              ? `${theme.primaryLightBg} ${theme.primaryBorder} border-2 shadow-xxs` 
-                              : 'bg-white border-slate-200 hover:border-slate-300'
-                          }`}
-                        >
-                          <div>
-                            <div className="flex items-start justify-between gap-2">
-                              <h4 className="text-sm font-semibold text-slate-800 line-clamp-2">{drug.name}</h4>
-                              {isRefrigerated && (
-                                <span className="bg-blue-100 text-blue-700 text-[10px] font-bold px-1.5 py-0.5 rounded flex items-center gap-0.5 shrink-0">
-                                  <ThermometerSnowflake className="w-3 h-3" /> ตู้เย็น
-                                </span>
-                              )}
-                              {isSpecial && (
-                                <span className="bg-red-100 text-red-700 text-[10px] font-bold px-1.5 py-0.5 rounded shrink-0">
-                                  ควบคุมพิเศษ
-                                </span>
-                              )}
-                              {isOffList && (
-                                <span className="bg-purple-100 text-purple-700 text-[10px] font-bold px-1.5 py-0.5 rounded shrink-0">
-                                  นอกบัญชี
-                                </span>
-                              )}
-                            </div>
-                            <div className="flex items-center gap-1.5 mt-2.5">
-                              <span className="text-xs bg-slate-100 text-slate-600 px-2 py-0.5 rounded font-medium">
-                                {CATEGORY_LABELS[drug.category]}
-                              </span>
-                            </div>
-                          </div>
-
-                          <div className="flex items-center justify-between border-t border-slate-100 pt-2.5 mt-1.5">
-                            <span className="text-xs text-slate-500 font-mono">
-                              คลัง: <span className="font-bold text-slate-700">{drug.stock}</span> {drug.unit}
-                            </span>
-
-                            {isSelected ? (
-                              <button
-                                type="button"
-                                onClick={() => removeMedication(drug.id)}
-                                className="text-xs font-semibold text-rose-600 hover:text-rose-700 hover:underline px-2 py-1"
-                              >
-                                ยกเลิกการเลือก
-                              </button>
-                            ) : (
-                              <button
-                                type="button"
-                                onClick={() => addMedication(drug.id)}
-                                disabled={txType === 'เบิก' && drug.stock <= 0}
-                                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1 ${
-                                  txType === 'เบิก' && drug.stock <= 0
-                                    ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
-                                    : `${theme.buttonColor} shadow-xxs`
-                                }`}
-                              >
-                                {txType === 'เบิก' && drug.stock <= 0 ? null : <Plus className="w-3.5 h-3.5" />}
-                                {txType === 'เบิก' && drug.stock <= 0 ? 'สินค้าหมด' : (txType === 'เบิก' ? 'เลือกเบิก' : 'เลือกคืน')}
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })
-                  )}
-                </div>
-
-              </div>
-
-              {/* Selected Medications Queue (รายการที่กำลังจะเบิก/คืน) */}
-              <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
-                <div className="flex items-center justify-between border-b border-slate-100 pb-4 mb-4">
-                  <div>
-                    <h3 className="text-base font-bold text-slate-800 flex items-center gap-2">
-                      <CheckCircle className={`w-5 h-5 ${theme.iconColor}`} />
-                      รายการยาที่เลือก ({Object.keys(selectedMedications).length} รายการ)
-                    </h3>
-                    <p className="text-xs text-slate-500 mt-0.5">โปรดตรวจสอบจำนวนที่ต้องการ {txType}</p>
-                  </div>
-                  {Object.keys(selectedMedications).length > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => setSelectedMedications({})}
-                      className="text-xs text-slate-400 hover:text-rose-600 transition"
-                    >
-                      ล้างทั้งหมด
-                    </button>
-                  )}
-                </div>
-
-                {Object.keys(selectedMedications).length === 0 ? (
-                  <div className="py-12 text-center text-slate-400 text-sm">
-                    <Activity className="w-10 h-10 text-slate-200 mx-auto mb-2.5" />
-                    ยังไม่ได้เลือกยาสำหรับการ{txType}ในครั้งนี้
-                  </div>
-                ) : (
-                  <div className="divide-y divide-slate-100 max-h-[300px] overflow-y-auto pr-1">
-                    {Object.entries(selectedMedications).map(([drugId, quantity]) => {
-                      const d = drugs.find(item => item.id === drugId);
-                      if (!d) return null;
-
-                      return (
-                        <div key={drugId} className="py-3.5 flex items-center justify-between gap-4">
-                          <div className="min-w-0">
-                            <h4 className="text-sm font-semibold text-slate-800 truncate">{d.name}</h4>
-                            <p className="text-xs text-slate-500 font-mono mt-0.5">
-                              คงเหลือในคลัง: {d.stock} {d.unit} | หมวด: {CATEGORY_LABELS[d.category]}
-                            </p>
-                          </div>
-
-                          <div className="flex items-center gap-3 shrink-0">
-                            {/* Quantity buttons */}
-                            <div className="flex items-center border border-slate-200 rounded-lg overflow-hidden bg-slate-50">
-                              <button
-                                type="button"
-                                onClick={() => updateMedicationQty(drugId, -1)}
-                                className="p-2 hover:bg-slate-100 transition text-slate-600"
-                              >
-                                <Minus className="w-3.5 h-3.5" />
-                              </button>
-                              <span className="px-3.5 py-1 text-sm font-bold text-slate-800 font-mono w-10 text-center">
-                                {quantity}
-                              </span>
-                              <button
-                                type="button"
-                                onClick={() => updateMedicationQty(drugId, 1)}
-                                className="p-2 hover:bg-slate-100 transition text-slate-600"
-                              >
-                                <Plus className="w-3.5 h-3.5" />
-                              </button>
-                            </div>
-
-                            <span className="text-xs text-slate-500 font-medium w-8">
-                              {d.unit}
-                            </span>
-
-                            {/* Delete button */}
-                            <button
-                              type="button"
-                              onClick={() => removeMedication(drugId)}
-                              className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-
-              {/* Notes / Remark */}
-              <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-4">
-                <div>
-                  <h3 className="text-sm font-bold text-slate-800 flex items-center gap-2">
-                    <FileText className={`w-4.5 h-4.5 ${theme.iconColor}`} />
-                    หมายเหตุ (ถ้ามี)
-                  </h3>
-                  <p className="text-xs text-slate-500 mt-0.5">ระบุหมายเหตุเพิ่มเติม เช่น เคสเร่งด่วน, แพ้ยา, ส่งคืนส่วนที่เหลือ...</p>
-                </div>
-                <div className="relative">
-                  <input
-                    type="text"
-                    placeholder="พิมพ์ข้อความหมายเหตุที่นี่..."
-                    value={notes}
-                    onChange={(e) => setNotes(e.target.value)}
-                    className={`w-full bg-slate-50 border border-slate-200 rounded-xl pl-3.5 pr-10 py-3 text-slate-800 focus:outline-none focus:ring-2 ${theme.primaryRing} text-sm`}
-                  />
-                  <div className="absolute inset-y-0 right-0 flex items-center pr-3 text-slate-400">
-                    <FileText className="w-4 h-4" />
-                  </div>
-                </div>
-              </div>
-
-            </div>
-
-          </div>
-
-          {/* --- 4. BOTTOM UNIFIED SAVE ACTION BLOCK --- */}
-          <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-6 mt-6">
-            <div className="border-b border-slate-100 pb-4">
-              <h3 className="text-lg font-bold text-slate-850 flex items-center gap-2">
-                <CheckCircle className={`w-5 h-5 ${theme.iconColor}`} />
-                4. ตรวจสอบข้อมูลและบันทึกรายการ
-              </h3>
-              <p className="text-xs text-slate-500 mt-0.5">กรุณาตรวจสอบรายละเอียดความถูกต้องทั้งหมดก่อนบันทึกเข้าระบบ</p>
-            </div>
-
-            {/* Live summary badge stats */}
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-4 bg-slate-50 p-4.5 rounded-xl border border-slate-200/60 text-sm">
-              <div>
-                <span className="text-xs text-slate-400 font-bold block uppercase tracking-wide">ประเภทรายการ</span>
-                <span className={`inline-block mt-1 px-3 py-1 rounded-full text-xs font-bold ${
-                  txType === 'เบิก' ? 'bg-emerald-100 text-emerald-800 border border-emerald-200' : 'bg-amber-100 text-amber-800 border border-amber-200'
-                }`}>
-                  {txType === 'เบิก' ? 'เบิกจ่ายยา (Stock Out)' : 'คืนยาเข้าคลัง (Stock In)'}
-                </span>
-              </div>
-              <div>
-                <span className="text-xs text-slate-400 font-bold block uppercase tracking-wide">ห้อง OR / แผนก</span>
-                <span className="font-bold text-slate-700 mt-1 block">
-                  {orRoom ? orRoom : <span className="text-rose-500 italic">ยังไม่ได้เลือกห้อง OR</span>}
-                </span>
-              </div>
-              <div>
-                <span className="text-xs text-slate-400 font-bold block uppercase tracking-wide">ชื่อ-นามสกุล หรือ HN</span>
-                <span className="font-bold text-slate-700 mt-1 block">
-                  {patientHN ? patientHN : <span className="text-rose-500 italic">ยังไม่ได้ระบุข้อมูลผู้ป่วย</span>}
-                </span>
-              </div>
-              <div>
-                <span className="text-xs text-slate-400 font-bold block uppercase tracking-wide">{txType === 'เบิก' ? 'ชื่อผู้เบิกยา' : 'ชื่อผู้ส่งคืนยา'}</span>
-                <span className="font-bold text-slate-700 mt-1 block">
-                  {requesterName ? requesterName : <span className="text-rose-500 italic">ยังไม่ได้ระบุชื่อ</span>}
-                </span>
-              </div>
-            </div>
-
-            {/* Quick summary of items selected */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs text-slate-600">
-              <div className="p-3.5 bg-slate-50/50 rounded-xl border border-slate-100">
-                <span className="font-bold text-slate-500 block mb-1.5">
-                  {txType === 'เบิก' ? 'รายการกล่องยาที่เบิก:' : 'รายการกล่องยาที่คืน:'}
-                </span>
-                <ul className="space-y-1 text-slate-700">
-                  <li className="flex justify-between">
-                    <span>• กล่องยา Block:</span> 
-                    <span className={`font-bold ${
-                      (txType === 'เบิก' ? blockBox === 'เบิก' : blockBox === 'คืน') 
-                        ? (txType === 'เบิก' ? 'text-emerald-600' : 'text-amber-600') 
-                        : 'text-slate-400'
-                    }`}>{blockBox}</span>
-                  </li>
-                  <li className="flex justify-between">
-                    <span>• กล่องยา Extra:</span> 
-                    <span className={`font-bold ${
-                      (txType === 'เบิก' ? extraBox === 'เบิก' : extraBox === 'คืน') 
-                        ? (txType === 'เบิก' ? 'text-emerald-600' : 'text-amber-600') 
-                        : 'text-slate-400'
-                    }`}>{extraBox}</span>
-                  </li>
-                  <li className="flex justify-between">
-                    <span>• กล่องยาเย็น / อุณหภูมิห้อง:</span> 
-                    <span className={`font-bold ${
-                      (txType === 'เบิก' ? coldOrRoomTempBox === 'เบิก' : coldOrRoomTempBox === 'คืน') 
-                        ? (txType === 'เบิก' ? 'text-emerald-600' : 'text-amber-600') 
-                        : 'text-slate-400'
-                    }`}>{coldOrRoomTempBox}</span>
-                  </li>
-                </ul>
-              </div>
-
-              {/* Right Summary Column */}
-              <div className="p-3.5 bg-slate-50/50 rounded-xl border border-slate-100 flex flex-col justify-between">
-                <div>
-                  <span className="font-bold text-slate-500 block mb-1.5">
-                    {txType === 'เบิก' ? 'รายการยาเพิ่มเติมที่เบิก:' : 'รายการยาเพิ่มเติมที่คืน:'}
-                  </span>
-                  {Object.keys(selectedMedications).length === 0 ? (
-                    <span className="text-slate-400 italic text-[11px]">ไม่มีรายการยาเพิ่มเติม</span>
-                  ) : (
-                    <ul className="space-y-1 text-slate-700 max-h-32 overflow-y-auto pr-1">
+                    <div className="space-y-3">
                       {Object.keys(selectedMedications).map((drugId) => {
-                        const drug = drugs.find(m => m.id === drugId);
+                        const drug = drugs.find((d) => d.id === drugId);
                         if (!drug) return null;
                         const qty = selectedMedications[drugId];
                         return (
-                          <li key={drugId} className="flex justify-between items-center gap-1.5 text-[11px]">
-                            <span className="truncate font-semibold text-slate-700">{drug.name}</span>
-                            <span className="font-black shrink-0 text-slate-900 bg-white border border-slate-200 px-1.5 py-0.5 rounded font-mono">
-                              x{qty} {drug.unit}
-                            </span>
-                          </li>
+                          <div key={drugId} className="flex items-center justify-between p-3 rounded-xl border border-slate-150 bg-slate-50/30 gap-4">
+                            <div className="min-w-0 flex-1">
+                              <h4 className="text-xs font-bold text-slate-800 truncate">{drug.name}</h4>
+                              <p className="text-[10px] text-slate-500 mt-0.5 font-medium">
+                                ในคลัง: {drug.stock} {drug.unit}
+                              </p>
+                            </div>
+                            <div className="flex items-center gap-2.5 shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => updateMedicationQty(drugId, -1)}
+                                className="w-8 h-8 rounded-lg bg-white border border-slate-250 hover:bg-slate-50 text-slate-600 flex items-center justify-center font-bold text-base transition active:scale-95 cursor-pointer"
+                              >
+                                -
+                              </button>
+                              <span className="w-8 text-center text-sm font-black text-slate-800 font-mono">{qty}</span>
+                              <button
+                                type="button"
+                                onClick={() => updateMedicationQty(drugId, 1)}
+                                className="w-8 h-8 rounded-lg bg-white border border-slate-250 hover:bg-slate-50 text-slate-600 flex items-center justify-center font-bold text-base transition active:scale-95 cursor-pointer"
+                              >
+                                +
+                              </button>
+                              <span className="text-xs text-slate-500 w-10 text-left font-semibold">{drug.unit}</span>
+                              <button
+                                type="button"
+                                onClick={() => removeMedication(drugId)}
+                                className="text-slate-400 hover:text-red-500 p-1.5 transition cursor-pointer"
+                                title="ลบรายการนี้"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </div>
                         );
                       })}
-                    </ul>
+                    </div>
                   )}
                 </div>
-              </div>
-            </div>
 
-            {/* Submit buttons */}
-            <div className="pt-4 flex items-center justify-end gap-3.5 border-t border-slate-100">
-              <button
-                type="submit"
-                className={`px-6 py-3 text-white font-extrabold text-sm rounded-xl flex items-center gap-2 shadow-md transition active:scale-[0.98] cursor-pointer w-full sm:w-auto justify-center ${
-                  txType === 'เบิก' ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-amber-600 hover:bg-amber-700'
-                }`}
-              >
-                <CheckCircle className="w-4.5 h-4.5" />
-                <span>ยืนยันและบันทึกรายการ (Save Transaction)</span>
-              </button>
-            </div>
+                {/* Submit Error & Action Buttons */}
+                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-4">
+                  {submitError && (
+                    <div className="p-4 bg-red-50 border border-red-200 rounded-xl text-red-800 text-xs font-semibold">
+                      ⚠️ {submitError}
+                    </div>
+                  )}
 
-          </div>
-        </form>
-      </>
-    )}
-
-        {/* ==================== TAB 2: SPECIAL CONTROLLED DRUGS PAGE ==================== */}
-        {activeTab === 'special_controlled' && (
-          <div className="space-y-8 no-print max-w-6xl mx-auto px-4 sm:px-6">
-            
-            {/* Banner Header - Elegant Soft Lavender & Sky Blue Clinical Theme */}
-            <div className="bg-gradient-to-r from-purple-50 via-sky-50 to-white border border-purple-100 border-l-4 border-l-purple-500 rounded-3xl p-6 md:p-8 shadow-xs relative overflow-hidden flex flex-col lg:flex-row items-center justify-between gap-6 transition duration-300">
-              <div className="absolute right-0 top-0 w-64 h-64 bg-purple-100/45 rounded-full blur-3xl pointer-events-none"></div>
-              <div className="absolute left-0 bottom-0 w-48 h-48 bg-sky-100/35 rounded-full blur-2xl pointer-events-none"></div>
-              
-              <div className="relative flex flex-col md:flex-row items-center gap-6 text-center md:text-left flex-1">
-                <div className="hidden sm:block shrink-0 w-32 h-20 md:w-36 md:h-24 rounded-2xl overflow-hidden border border-purple-200/60 shadow-xs bg-white">
-                  <img 
-                    src="/src/assets/images/minimalist_meds_banner_1782804220315.jpg" 
-                    alt="Minimalist Medicine" 
-                    referrerPolicy="no-referrer"
-                    className="w-full h-full object-cover"
-                  />
-                </div>
-                <div className="bg-purple-100/60 border border-purple-200/60 p-4 rounded-2xl flex items-center justify-center shadow-xxs sm:hidden shrink-0">
-                  <Pill className="w-8 h-8 text-purple-700" />
-                </div>
-                <div>
-                  <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-black bg-purple-100 text-purple-700 border border-purple-200/50 mb-2.5 uppercase tracking-wider">
-                    <ShieldAlert className="w-3.5 h-3.5 text-purple-600" /> High-Alert Medications (HAD) & Narcotics
+                  <div className="flex gap-4">
+                    <button
+                      type="button"
+                      onClick={resetForm}
+                      className="px-6 py-3 border border-slate-200 text-slate-600 font-bold rounded-xl text-xs hover:bg-slate-50 transition cursor-pointer"
+                    >
+                      ล้างแบบฟอร์ม
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={isSubmitting}
+                      className={`flex-1 py-3 px-6 rounded-xl text-xs font-bold text-white transition cursor-pointer ${
+                        isSubmitting
+                          ? 'bg-slate-300 text-slate-500 cursor-not-allowed'
+                          : isReturnMode
+                            ? 'bg-amber-600 hover:bg-amber-700 shadow-sm'
+                            : 'bg-emerald-600 hover:bg-emerald-700 shadow-sm'
+                      }`}
+                    >
+                      {isSubmitting ? 'กำลังบันทึกรายการ...' : `ยืนยันการทำรายการ${txType}ยา`}
+                    </button>
                   </div>
-                  <h2 className="text-xl md:text-3xl font-black text-purple-950 tracking-tight flex items-center gap-2.5 justify-center md:justify-start">
-                    <Pill className="w-7 h-7 text-purple-600 shrink-0" />
-                    ลงข้อมูลการใช้ยาควบคุมพิเศษ
-                  </h2>
-                  <p className="text-slate-600 text-sm mt-2 max-w-2xl leading-relaxed font-bold">
-                    ระบบรายงานหักล้างยอดใช้จริงและยาทิ้งทำลายของยาเสพติดให้โทษประเภท 2 และวัตถุออกฤทธิ์ต่อจิตประสาทสำหรับผู้ป่วยวิสัญญี ปรับสต็อกคงเหลืออัตโนมัติ
-                  </p>
                 </div>
-              </div>
-              
 
+              </div>
             </div>
-            
+            </form>
+          </>
+        )}
+
+        {activeTab === 'special_controlled' && (
+          <div className="space-y-8 animate-fade-in no-print">
+            <section id="hero-section" className="relative rounded-[36px] bg-gradient-to-br from-pink-50/60 via-purple-50/50 to-sky-50/60 border border-pink-100 p-6 md:p-10 text-center overflow-hidden shadow-sm flex flex-col items-center justify-center gap-8 max-w-4xl mx-auto">
+              {/* Decorative blur elements */}
+              <div className="absolute top-0 right-0 w-80 h-80 bg-pink-200/20 rounded-full blur-3xl pointer-events-none"></div>
+              <div className="absolute bottom-0 left-0 w-64 h-64 bg-sky-200/20 rounded-full blur-2xl pointer-events-none"></div>
+              
+              <div className="space-y-4 relative z-10 w-full flex flex-col items-center">
+                <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-black bg-pink-100/70 text-pink-600 border border-pink-200/40 uppercase tracking-widest">
+                  <Sparkles className="w-3.5 h-3.5 text-pink-500 animate-pulse" /> High-Alert Drugs & Narcotics Log
+                </div>
+                
+                <h1 className="text-3xl md:text-4xl lg:text-5xl font-black text-slate-800 leading-tight tracking-tight">
+                  ระบบบันทึกข้อมูลการใช้ <br className="sm:hidden" />
+                  <span className="bg-gradient-to-r from-pink-500 via-purple-500 to-indigo-500 bg-clip-text text-transparent ml-1">
+                    ยาควบคุมพิเศษวิสัญญี
+                  </span>
+                </h1>
+              </div>
+
+                                        </section>
+
             {/* Main Form container */}
-            <form onSubmit={handleSubmitSpecialControlled} className="space-y-8">
+            <form id="controlled-form-section" onSubmit={handleSubmitSpecialControlled} className="space-y-8">
               
               {/* 1. Global Information Card */}
-              <div className="bg-white rounded-3xl border border-slate-150 border-l-4 border-l-purple-500 p-6 md:p-8 shadow-sm relative overflow-hidden transition-all hover:shadow-md">
-                <div className="absolute right-0 top-0 w-32 h-32 bg-purple-50/50 rounded-full blur-2xl pointer-events-none"></div>
+              <div className="bg-white rounded-3xl border border-pink-100 border-l-4 border-l-pink-400 p-6 md:p-8 shadow-sm relative overflow-hidden transition-all hover:shadow-md">
+                <div className="absolute right-0 top-0 w-32 h-32 bg-pink-50/50 rounded-full blur-2xl pointer-events-none"></div>
                 
-                <div className="border-b border-slate-100 pb-4 mb-6 flex items-center justify-between flex-wrap gap-2">
+                <div className="border-b border-pink-100 pb-4 mb-6 flex items-center justify-between flex-wrap gap-2">
                   <div className="flex items-center gap-3">
-                    <div className="bg-purple-50 p-2.5 rounded-xl text-purple-700 border border-purple-100">
+                    <div className="bg-pink-50 p-2.5 rounded-xl text-pink-600 border border-pink-100">
                       <UserCheck className="w-5 h-5" />
                     </div>
                     <div>
-                      <h3 className="text-base md:text-lg font-black text-purple-950">1. ข้อมูลผู้บันทึกรายงานและผู้สอบทาน</h3>
+                      <h3 className="text-base md:text-lg font-black text-slate-800">1. ข้อมูลผู้บันทึกรายงานและผู้สอบทาน</h3>
                       <p className="text-xs text-slate-500 mt-1 font-bold">กรุณาระบุตัวตนเจ้าหน้าที่ผู้ทำการเบิกและใช้งานตามหลักเกณฑ์วิชาชีพเวชกรรม</p>
                     </div>
                   </div>
-                  <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded bg-purple-50 border border-purple-100 text-[10px] text-purple-700 font-mono font-black">
+                  <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded bg-blue-50 border border-blue-100 text-[10px] text-blue-700 font-mono font-black">
                     <Lock className="w-3.5 h-3.5" /> AUDITED LOG
                   </div>
                 </div>
@@ -3902,7 +3707,7 @@ export default function App() {
                   {/* Requester Name */}
                   <div className="space-y-2">
                     <label className="block text-xs md:text-sm font-black text-slate-900 uppercase tracking-wide flex items-center gap-2">
-                      <User className="w-4 h-4 text-purple-600" />
+                      <User className="w-4 h-4 text-blue-600" />
                       ชื่อผู้บันทึกข้อมูลการใช้ยา *
                     </label>
                     <div className="relative rounded-xl shadow-xxs">
@@ -3912,9 +3717,9 @@ export default function App() {
                         placeholder="ระบุชื่อ-นามสกุล ของวิสัญญีแพทย์/วิสัญญีพยาบาล..."
                         value={requesterName}
                         onChange={(e) => setRequesterName(e.target.value)}
-                        className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-4 pr-12 py-3 text-slate-850 font-extrabold focus:ring-4 focus:ring-purple-100 focus:border-purple-400 focus:outline-none text-sm transition-all placeholder:text-slate-400"
+                        className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-4 pr-12 py-3 text-slate-850 font-extrabold focus:ring-4 focus:ring-blue-100 focus:border-blue-400 focus:outline-none text-sm transition-all placeholder:text-slate-400"
                       />
-                      <div className="absolute inset-y-0 right-0 flex items-center pr-4 text-purple-600 pointer-events-none">
+                      <div className="absolute inset-y-0 right-0 flex items-center pr-4 text-blue-600 pointer-events-none">
                         <UserCheck className="w-5 h-5" />
                       </div>
                     </div>
@@ -3923,7 +3728,7 @@ export default function App() {
                   {/* Global Notes */}
                   <div className="space-y-2">
                     <label className="block text-xs md:text-sm font-black text-slate-900 uppercase tracking-wide flex items-center gap-2">
-                      <ClipboardList className="w-4 h-4 text-purple-600" />
+                      <ClipboardList className="w-4 h-4 text-blue-600" />
                       หมายเหตุเพิ่มเติม (ถ้ามี)
                     </label>
                     <div className="relative rounded-xl shadow-xxs">
@@ -3932,30 +3737,24 @@ export default function App() {
                         placeholder="พิมพ์ระบุหมายเหตุ เช่น เคสด่วนพิเศษ, พยานลงนามทำลายเศษยา..."
                         value={notes}
                         onChange={(e) => setNotes(e.target.value)}
-                        className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-4 pr-12 py-3 text-slate-850 font-extrabold focus:ring-4 focus:ring-purple-100 focus:border-purple-400 focus:outline-none text-sm transition-all placeholder:text-slate-400"
+                        className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-4 pr-12 py-3 text-slate-850 font-extrabold focus:ring-4 focus:ring-blue-100 focus:border-blue-400 focus:outline-none text-sm transition-all placeholder:text-slate-400"
                       />
-                      <div className="absolute inset-y-0 right-0 flex items-center pr-4 text-slate-400 pointer-events-none">
-                        <FileText className="w-5 h-5 text-purple-400" />
+                      <div className="absolute inset-y-0 right-0 flex items-center pr-4 text-slate-450 pointer-events-none">
+                        <FileText className="w-5 h-5 text-blue-400" />
                       </div>
                     </div>
                   </div>
                 </div>
 
-                {/* Audit helper message block */}
-                <div className="mt-6 bg-purple-50/50 rounded-2xl border border-purple-100 p-4 flex items-start gap-3">
-                  <Info className="w-5 h-5 text-purple-600 shrink-0 mt-0.5" />
-                  <p className="text-xs text-purple-950 font-bold leading-relaxed">
-                    <span className="font-extrabold text-purple-700">ประกาศระเบียบโรงพยาบาล:</span> การใช้ยานอกเหนือเต็มจำนวน (ทิ้งเศษ) จะต้องมีพยานตรวจสอบร่วมและกรอกปริมาณทิ้งยาทำลายให้ตรงตามความจริงอย่างเคร่งครัด เพื่อใช้จัดส่งพิจารณาในรายงาน ย.ส. 5 / บ.จ. 5 เสนอสำนักงานคณะกรรมการอาหารและยา (อย.)
-                  </p>
-                </div>
+
               </div>
 
               {/* 2. Patient Cases Form List */}
               <div className="space-y-6">
-                <div className="flex items-center justify-between flex-wrap gap-4 bg-purple-50/40 border border-purple-100 rounded-2xl p-5 shadow-xxs">
+                <div className="flex items-center justify-between flex-wrap gap-4 bg-blue-50/40 border border-blue-100 rounded-2xl p-5 shadow-xxs">
                   <div>
-                    <h3 className="text-sm md:text-lg font-black text-purple-950 tracking-tight flex items-center gap-2.5">
-                      <ClipboardList className="w-5 h-5 text-purple-700" />
+                    <h3 className="text-sm md:text-lg font-black text-blue-950 tracking-tight flex items-center gap-2.5">
+                      <ClipboardList className="w-5 h-5 text-blue-700" />
                       2. รายการข้อมูลผู้ป่วยวิสัญญี ({controlledCases.length} เคส)
                     </h3>
                     <p className="text-xs text-slate-500 mt-1 font-bold">กรุณากรอกข้อมูลจำเพาะเคสและเลือกรายงานปริมาณยารายบุคคล</p>
@@ -3965,7 +3764,7 @@ export default function App() {
                   <button
                     type="button"
                     onClick={handleAddControlledCase}
-                    className="px-5 py-3 bg-gradient-to-r from-purple-600 via-indigo-600 to-purple-600 hover:from-purple-700 hover:to-indigo-700 text-white font-black text-xs md:text-sm rounded-xl flex items-center justify-center gap-2.5 shadow-md hover:shadow-lg transition-all active:scale-[0.98] cursor-pointer hover:ring-4 hover:ring-purple-100"
+                    className="px-5 py-3 bg-gradient-to-r from-blue-700 to-blue-800 hover:from-blue-800 hover:to-blue-900 text-white font-black text-xs md:text-sm rounded-xl flex items-center justify-center gap-2.5 shadow-md hover:shadow-lg transition-all active:scale-[0.98] cursor-pointer hover:ring-4 hover:ring-blue-100"
                   >
                     <Plus className="w-5 h-5 stroke-[2.5px] text-white" />
                     เพิ่มเคสผู้ป่วยวิสัญญี (+ Add New Case)
@@ -3981,16 +3780,16 @@ export default function App() {
                       <div 
                         key={c.id} 
                         id={`case-card-${c.id}`}
-                        className="bg-white rounded-3xl border border-slate-150 border-l-4 border-l-purple-500 shadow-sm hover:shadow-md transition-all duration-350 overflow-hidden"
+                        className="bg-white rounded-3xl border border-slate-150 border-l-4 border-l-blue-600 shadow-sm hover:shadow-md transition-all duration-350 overflow-hidden"
                       >
                         {/* Case Card Header - Clean Medical Tab look */}
-                        <div className="bg-purple-50/40 px-5 py-4 border-b border-purple-100 flex items-center justify-between flex-wrap gap-3">
+                        <div className="bg-blue-50/40 px-5 py-4 border-b border-blue-100 flex items-center justify-between flex-wrap gap-3">
                           <div className="flex items-center gap-3">
-                            <span className="w-8 h-8 rounded-xl bg-purple-600 text-white text-xs md:text-sm font-black flex items-center justify-center shadow-xs font-mono">
+                            <span className="w-8 h-8 rounded-xl bg-blue-700 text-white text-xs md:text-sm font-black flex items-center justify-center shadow-xs font-mono">
                               {caseNum}
                             </span>
                             <div>
-                              <h4 className="text-xs md:text-sm font-black text-purple-950 flex items-center gap-2">
+                              <h4 className="text-xs md:text-sm font-black text-blue-950 flex items-center gap-2">
                                 บันทึกรายงานยาเสพติดวิสัญญี รายที่ {caseNum}
                               </h4>
                               <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">Anesthesia Case ID #{c.id.substring(c.id.length - 6)}</p>
@@ -4010,17 +3809,17 @@ export default function App() {
                         </div>
 
                         {/* Case Card Body */}
-                        <div className="p-6 md:p-8 space-y-6 bg-gradient-to-b from-purple-50/10 to-transparent">
+                        <div className="p-6 md:p-8 space-y-6 bg-gradient-to-b from-blue-50/10 to-transparent">
                           
                           {/* Row 1: Patient Demographic Details */}
                           <div className="bg-slate-50/40 border border-slate-150 rounded-2xl p-5 md:p-6 grid grid-cols-1 md:grid-cols-2 gap-6 shadow-inner">
                             {/* OR Room selection */}
                             <div className="space-y-2">
                               <label className="block text-xs md:text-sm font-black text-slate-900 uppercase tracking-wide flex items-center gap-2">
-                                <Building className="w-4.5 h-4.5 text-purple-600" />
+                                <Building className="w-4.5 h-4.5 text-blue-600" />
                                 ห้อง OR / แผนกวิสัญญี *
                               </label>
-                              <div className="relative rounded-xl shadow-xxs bg-white border border-slate-200 focus-within:ring-4 focus-within:ring-purple-100 focus-within:border-purple-400">
+                              <div className="relative rounded-xl shadow-xxs bg-white border border-slate-200 focus-within:ring-4 focus-within:ring-blue-100 focus-within:border-blue-400">
                                 <select
                                   value={c.orRoom}
                                   required
@@ -4043,7 +3842,7 @@ export default function App() {
                             {/* Patient HN / Name */}
                             <div className="space-y-2">
                               <label className="block text-xs md:text-sm font-black text-slate-900 uppercase tracking-wide flex items-center gap-2">
-                                <Activity className="w-4.5 h-4.5 text-purple-600" />
+                                <Activity className="w-4.5 h-4.5 text-blue-600" />
                                 หมายเลข HN หรือชื่อ-นามสกุลผู้ป่วย *
                               </label>
                               <div className="relative rounded-xl shadow-xxs">
@@ -4054,9 +3853,9 @@ export default function App() {
                                   placeholder="ระบุ HN (เช่น HN69XXXXX) หรือระบุชื่อ-นามสกุล..."
                                   value={c.patientHN}
                                   onChange={(e) => handleUpdateControlledCase(c.id, { patientHN: e.target.value })}
-                                  className="w-full bg-white border border-slate-200 rounded-xl pl-4 pr-10 py-3 text-slate-850 font-extrabold focus:ring-4 focus:ring-purple-100 focus:border-purple-400 focus:outline-none text-sm transition-all placeholder:text-slate-400"
+                                  className="w-full bg-white border border-slate-200 rounded-xl pl-4 pr-10 py-3 text-slate-850 font-extrabold focus:ring-4 focus:ring-blue-100 focus:border-blue-400 focus:outline-none text-sm transition-all placeholder:text-slate-400"
                                 />
-                                <div className="absolute inset-y-0 right-0 flex items-center pr-4 text-slate-400 pointer-events-none">
+                                <div className="absolute inset-y-0 right-0 flex items-center pr-4 text-slate-450 pointer-events-none">
                                   <User className="w-4.5 h-4.5" />
                                 </div>
                               </div>
@@ -4067,14 +3866,14 @@ export default function App() {
                           <div className="space-y-4 pt-2">
                             <div className="flex items-center justify-between border-b border-slate-100 pb-3 flex-wrap gap-2">
                               <h5 className="text-xs md:text-sm font-extrabold text-slate-900 uppercase tracking-wide flex items-center gap-2">
-                                <Pill className="w-4.5 h-4.5 text-purple-600" />
+                                <Pill className="w-4.5 h-4.5 text-blue-600" />
                                 รายการยาควบคุมพิเศษที่ใช้ในเคสนี้ *
                               </h5>
                               
                               <button
                                 type="button"
                                 onClick={() => handleAddDrugToCase(c.id)}
-                                className="text-purple-700 hover:text-white hover:bg-purple-600 bg-purple-50 hover:shadow-xs px-4 py-2 rounded-xl text-xs font-black flex items-center gap-1.5 transition duration-200 active:scale-[0.98] cursor-pointer border border-purple-100 hover:border-purple-600"
+                                className="text-blue-700 hover:text-white hover:bg-blue-700 bg-blue-50 hover:shadow-xs px-4 py-2 rounded-xl text-xs font-black flex items-center gap-1.5 transition duration-200 active:scale-[0.98] cursor-pointer border border-blue-100 hover:border-blue-700"
                               >
                                 <Plus className="w-3.5 h-3.5 stroke-[2.5px]" />
                                 เพิ่มยาตัวอื่นในเคสนี้ (+ Add Drug)
@@ -4084,7 +3883,7 @@ export default function App() {
                             {/* Drug Table container - Clean & Space-efficient */}
                             <div className="border border-slate-150 rounded-2xl overflow-hidden bg-white shadow-xs">
                               {/* Table Header Row (Desktop Only) */}
-                              <div className="hidden md:grid grid-cols-12 gap-3 bg-purple-50/30 px-5 py-3.5 border-b border-slate-150 text-xs font-black text-purple-950 uppercase tracking-widest">
+                              <div className="hidden md:grid grid-cols-12 gap-3 bg-blue-50/30 px-5 py-3.5 border-b border-slate-150 text-xs font-black text-blue-950 uppercase tracking-widest">
                                 <div className="col-span-1">#</div>
                                 <div className="col-span-3">ยาควบคุมพิเศษ (Drug Name)</div>
                                 <div className="col-span-2 text-center">จำนวนเปิดใช้ (Qty)</div>
@@ -4102,6 +3901,7 @@ export default function App() {
                                   
                                   const usedVal = parseFloat(drug.actualUsed) || 0;
                                   const wasteVal = parseFloat(drug.wastage) || 0;
+                                  const ratio = expectedTotalCapacity > 0 ? (usedVal / expectedTotalCapacity) * 100 : 0;
                                   const totalSum = usedVal + wasteVal;
                                   const hasInputs = drug.actualUsed.trim() !== '' && drug.wastage.trim() !== '';
                                   const isMismatch = drug.drugName !== 'Ketamine' && hasInputs && Math.abs(totalSum - expectedTotalCapacity) > 0.0001;
@@ -4110,17 +3910,17 @@ export default function App() {
                                   return (
                                     <div key={drug.id} className="p-4 md:p-0">
                                       {/* Desktop Layout View */}
-                                      <div className="hidden md:grid grid-cols-12 gap-3 px-5 py-4 items-center hover:bg-purple-50/5 transition duration-150">
+                                      <div className="hidden md:grid grid-cols-12 gap-3 px-5 py-4 items-center hover:bg-blue-50/5 transition duration-150">
                                         {/* Col 1: Index */}
                                         <div className="col-span-1">
-                                          <span className="w-8 h-8 bg-purple-50 border border-purple-100 text-purple-700 rounded-lg flex items-center justify-center text-sm font-black font-mono shadow-xxs">
+                                          <span className="w-8 h-8 bg-blue-50 border border-blue-100 text-blue-700 rounded-lg flex items-center justify-center text-sm font-black font-mono shadow-xxs">
                                             {drugNum}
                                           </span>
                                         </div>
 
                                         {/* Col 2: Drug Select */}
                                         <div className="col-span-3">
-                                          <div className="relative rounded-xl border border-slate-300 bg-white hover:border-purple-400 transition-colors shadow-xxs">
+                                          <div className="relative rounded-xl border border-slate-300 bg-white hover:border-blue-400 transition-colors shadow-xxs">
                                             <select
                                               value={drug.drugName}
                                               onChange={(e) => handleUpdateDrugInCase(c.id, drug.id, { drugName: e.target.value })}
@@ -4140,7 +3940,7 @@ export default function App() {
 
                                         {/* Col 3: Amps Qty Stepper */}
                                         <div className="col-span-2 flex justify-center">
-                                          <div className="flex items-center border border-slate-300 rounded-xl overflow-hidden bg-white justify-between h-11 w-28 shadow-xxs hover:border-purple-300 transition-colors">
+                                          <div className="flex items-center border border-slate-300 rounded-xl overflow-hidden bg-white justify-between h-11 w-28 shadow-xxs hover:border-blue-300 transition-colors">
                                             <button
                                               type="button"
                                               onClick={() => {
@@ -4175,7 +3975,7 @@ export default function App() {
                                               onClick={() => handleUpdateDrugInCase(c.id, drug.id, { useMode: 'full' })}
                                               className={`py-1.5 rounded-lg text-xs font-black transition-all text-center h-full flex items-center justify-center cursor-pointer ${
                                                 drug.useMode === 'full'
-                                                  ? 'bg-purple-600 text-white shadow-xxs'
+                                                  ? 'bg-blue-700 text-white shadow-xxs'
                                                   : 'text-slate-600 hover:text-slate-850 hover:bg-white/50'
                                               }`}
                                             >
@@ -4212,8 +4012,16 @@ export default function App() {
                                                   step="any"
                                                   placeholder="ใช้จริง"
                                                   value={drug.actualUsed}
-                                                  onChange={(e) => handleUpdateDrugInCase(c.id, drug.id, { actualUsed: e.target.value })}
-                                                  className="w-full h-11 bg-white border border-slate-300 rounded-xl px-2 py-1 text-center text-sm text-slate-850 font-black focus:ring-4 focus:ring-purple-100 focus:border-purple-400 focus:outline-none transition-all shadow-xxs"
+                                                  onChange={(e) => {
+                                                    const val = e.target.value;
+                                                    const valNum = parseFloat(val) || 0;
+                                                    const waste = Math.max(0, expectedTotalCapacity - valNum);
+                                                    handleUpdateDrugInCase(c.id, drug.id, { 
+                                                      actualUsed: val, 
+                                                      wastage: val.trim() ? waste.toFixed(2).replace(/\.00$/, '') : '' 
+                                                    });
+                                                  }}
+                                                  className="w-full h-11 bg-white border border-slate-300 rounded-xl px-2 py-1 text-center text-sm text-slate-850 font-black focus:ring-4 focus:ring-blue-100 focus:border-blue-400 focus:outline-none transition-all shadow-xxs"
                                                   title="ปริมาณใช้จริง (mg)"
                                                 />
                                               </div>
@@ -4225,8 +4033,16 @@ export default function App() {
                                                   step="any"
                                                   placeholder="ทิ้งเศษ"
                                                   value={drug.wastage}
-                                                  onChange={(e) => handleUpdateDrugInCase(c.id, drug.id, { wastage: e.target.value })}
-                                                  className="w-full h-11 bg-white border border-slate-300 rounded-xl px-2 py-1 text-center text-sm text-slate-850 font-black focus:ring-4 focus:ring-purple-100 focus:border-purple-400 focus:outline-none transition-all shadow-xxs"
+                                                  onChange={(e) => {
+                                                    const val = e.target.value;
+                                                    const valNum = parseFloat(val) || 0;
+                                                    const used = Math.max(0, expectedTotalCapacity - valNum);
+                                                    handleUpdateDrugInCase(c.id, drug.id, { 
+                                                      wastage: val, 
+                                                      actualUsed: val.trim() ? used.toFixed(2).replace(/\.00$/, '') : '' 
+                                                    });
+                                                  }}
+                                                  className="w-full h-11 bg-white border border-slate-300 rounded-xl px-2 py-1 text-center text-sm text-slate-850 font-black focus:ring-4 focus:ring-blue-100 focus:border-blue-400 focus:outline-none transition-all shadow-xxs"
                                                   title="ปริมาณเหลือทิ้ง (mg)"
                                                 />
                                               </div>
@@ -4260,11 +4076,103 @@ export default function App() {
                                         </div>
                                       </div>
 
+                                      {/* Expanded Dosage Balancing Panel for Desktop (Partial Mode) */}
+                                      {drug.useMode === 'partial' && (
+                                        <div className="hidden md:block bg-blue-50/15 border-t border-b border-blue-100/30 px-12 py-4 space-y-3.5 animate-in slide-in-from-top duration-200">
+                                          <div className="flex items-center justify-between">
+                                            <div className="flex items-center gap-2">
+                                              <Sparkles className="w-4 h-4 text-blue-600" />
+                                              <span className="text-xs font-black text-blue-950">
+                                                Dosage Balancing Assistant — ยอดเปิดใช้ {expectedTotalCapacity} {meta.unit} ({drug.ampsCount} {meta.type === 'Amp' ? 'แอมป์' : 'ขวด'})
+                                              </span>
+                                            </div>
+                                            <div className="text-xs font-bold text-slate-500">
+                                              สัดส่วน: <span className="text-emerald-700 font-extrabold">ใช้จริง {ratio.toFixed(0)}%</span> / <span className="text-amber-700 font-extrabold">ยาทิ้ง {(100 - ratio).toFixed(0)}%</span>
+                                            </div>
+                                          </div>
+
+                                          {/* Proportional Digital Segmented Bar */}
+                                          <div className="space-y-1">
+                                            <div className="flex gap-1 justify-between w-full bg-slate-100/80 p-1.5 rounded-lg border border-slate-200 shadow-inner">
+                                              {Array.from({ length: 15 }).map((_, idx) => {
+                                                const threshold = ((idx + 1) / 15) * 100;
+                                                const isActive = ratio >= threshold;
+                                                return (
+                                                  <div 
+                                                    key={idx} 
+                                                    className={`h-2.5 flex-1 rounded-sm transition-all duration-300 ${
+                                                      isActive ? 'bg-emerald-500' : 'bg-amber-500'
+                                                    }`} 
+                                                  />
+                                                );
+                                              })}
+                                            </div>
+                                            <div className="flex items-center justify-between text-[10px] text-slate-500 font-bold px-1">
+                                              <span className="text-emerald-700 flex items-center gap-1 font-extrabold">◀ ใช้จริง (Patient Dose: {usedVal} {meta.unit})</span>
+                                              <span className="text-amber-700 flex items-center gap-1 font-extrabold">ยาทิ้งทำลาย (Wastage: {wasteVal} {meta.unit}) ▶</span>
+                                            </div>
+                                          </div>
+
+                                          {/* Slider Controls */}
+                                          <div className="flex items-center gap-4 py-1">
+                                            <span className="text-[11px] font-black text-emerald-700 shrink-0">ใช้ 0</span>
+                                            <input
+                                              type="range"
+                                              min="0"
+                                              max={expectedTotalCapacity}
+                                              step={drug.drugName === 'Fentanyl 2 ml' ? 5 : drug.drugName === 'Fentanyl 10 ml' ? 10 : drug.drugName === 'Pethidine' ? 5 : drug.drugName === 'Midazolam' ? 0.5 : drug.drugName === 'Ketamine' ? 10 : 1}
+                                              value={usedVal}
+                                              onChange={(e) => {
+                                                const val = parseFloat(e.target.value) || 0;
+                                                const waste = Math.max(0, expectedTotalCapacity - val);
+                                                handleUpdateDrugInCase(c.id, drug.id, { 
+                                                  actualUsed: val.toString(), 
+                                                  wastage: waste.toFixed(2).replace(/\.00$/, '') 
+                                                });
+                                              }}
+                                              className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-700 focus:outline-none transition-all"
+                                            />
+                                            <span className="text-[11px] font-black text-amber-700 shrink-0">ทิ้ง {expectedTotalCapacity} {meta.unit}</span>
+                                          </div>
+
+                                          {/* Clinical Dosage Presets */}
+                                          <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-slate-100">
+                                            <span className="text-[11px] font-black text-slate-500 mr-1">ปริมาณใช้บ่อย (Common Clinical Dose Presets):</span>
+                                            {(DRUG_DOSAGE_PRESETS[drug.drugName] || [])
+                                              .filter(preset => preset <= expectedTotalCapacity)
+                                              .map(preset => {
+                                                const isSelected = Math.abs(usedVal - preset) < 0.01;
+                                                return (
+                                                  <button
+                                                    key={preset}
+                                                    type="button"
+                                                    onClick={() => {
+                                                      const waste = Math.max(0, expectedTotalCapacity - preset);
+                                                      handleUpdateDrugInCase(c.id, drug.id, {
+                                                        actualUsed: preset.toString(),
+                                                        wastage: waste.toFixed(2).replace(/\.00$/, '')
+                                                      });
+                                                    }}
+                                                    className={`px-3 py-1.5 rounded-lg text-xs font-black transition-all duration-150 flex items-center gap-1 border cursor-pointer ${
+                                                      isSelected
+                                                        ? 'bg-emerald-600 text-white border-emerald-600 shadow-xxs scale-[1.03]'
+                                                        : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200 hover:border-slate-350'
+                                                    }`}
+                                                  >
+                                                    {isSelected && <Check className="w-3 h-3 stroke-[3px]" />}
+                                                    {preset} {meta.unit}
+                                                  </button>
+                                                );
+                                              })}
+                                          </div>
+                                        </div>
+                                      )}
+
                                       {/* Mobile Layout View */}
                                       <div className="block md:hidden space-y-3.5">
                                         <div className="flex items-center justify-between border-b border-slate-200 pb-2">
                                           <span className="text-xs font-extrabold text-slate-900 flex items-center gap-1.5">
-                                            <span className="w-8 h-8 bg-purple-50 border border-purple-100 text-purple-700 rounded-lg flex items-center justify-center text-sm font-black font-mono shadow-xxs">
+                                            <span className="w-8 h-8 bg-blue-50 border border-blue-100 text-blue-700 rounded-lg flex items-center justify-center text-sm font-black font-mono shadow-xxs">
                                               {drugNum}
                                             </span>
                                             รายการยาควบคุมพิเศษ
@@ -4345,7 +4253,7 @@ export default function App() {
                                                 onClick={() => handleUpdateDrugInCase(c.id, drug.id, { useMode: 'full' })}
                                                 className={`py-1.5 rounded-lg text-xs font-black transition-all text-center h-full flex items-center justify-center cursor-pointer ${
                                                   drug.useMode === 'full'
-                                                    ? 'bg-purple-600 text-white shadow-xxs'
+                                                    ? 'bg-blue-700 text-white shadow-xxs'
                                                     : 'text-slate-600 hover:text-slate-850 hover:bg-white/50'
                                                 }`}
                                               >
@@ -4375,8 +4283,8 @@ export default function App() {
                                                 <span className="font-extrabold text-slate-900 bg-white border border-slate-200 px-2.5 py-1 rounded-lg shadow-xxs">{expectedTotalCapacity} {meta.unit}</span>
                                               </div>
                                             ) : (
-                                              <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-200 space-y-3 shadow-inner">
-                                                <div className="grid grid-cols-2 gap-3">
+                                              <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-4.5 shadow-inner">
+                                                <div className="grid grid-cols-2 gap-3.5">
                                                   <div>
                                                     <label className="block text-xs font-bold text-slate-700 mb-1">ใช้จริง ({meta.unit})</label>
                                                     <input
@@ -4385,8 +4293,16 @@ export default function App() {
                                                       step="any"
                                                       placeholder="0.0"
                                                       value={drug.actualUsed}
-                                                      onChange={(e) => handleUpdateDrugInCase(c.id, drug.id, { actualUsed: e.target.value })}
-                                                      className="w-full bg-white border border-slate-300 rounded-xl px-2.5 py-2.5 h-11 text-sm text-slate-850 font-black focus:ring-4 focus:ring-purple-100 focus:border-purple-400 focus:outline-none transition-all shadow-xxs"
+                                                      onChange={(e) => {
+                                                        const val = e.target.value;
+                                                        const valNum = parseFloat(val) || 0;
+                                                        const waste = Math.max(0, expectedTotalCapacity - valNum);
+                                                        handleUpdateDrugInCase(c.id, drug.id, { 
+                                                          actualUsed: val, 
+                                                          wastage: val.trim() ? waste.toFixed(2).replace(/\.00$/, '') : '' 
+                                                        });
+                                                      }}
+                                                      className="w-full bg-white border border-slate-300 rounded-xl px-2.5 py-2.5 h-11 text-sm text-slate-850 font-black focus:ring-4 focus:ring-blue-100 focus:border-blue-400 focus:outline-none transition-all shadow-xxs"
                                                     />
                                                   </div>
                                                   <div>
@@ -4397,9 +4313,91 @@ export default function App() {
                                                       step="any"
                                                       placeholder="0.0"
                                                       value={drug.wastage}
-                                                      onChange={(e) => handleUpdateDrugInCase(c.id, drug.id, { wastage: e.target.value })}
-                                                      className="w-full bg-white border border-slate-300 rounded-xl px-2.5 py-2.5 h-11 text-sm text-slate-850 font-black focus:ring-4 focus:ring-purple-100 focus:border-purple-400 focus:outline-none transition-all shadow-xxs"
+                                                      onChange={(e) => {
+                                                        const val = e.target.value;
+                                                        const valNum = parseFloat(val) || 0;
+                                                        const used = Math.max(0, expectedTotalCapacity - valNum);
+                                                        handleUpdateDrugInCase(c.id, drug.id, { 
+                                                          wastage: val, 
+                                                          actualUsed: val.trim() ? used.toFixed(2).replace(/\.00$/, '') : '' 
+                                                        });
+                                                      }}
+                                                      className="w-full bg-white border border-slate-300 rounded-xl px-2.5 py-2.5 h-11 text-sm text-slate-850 font-black focus:ring-4 focus:ring-blue-100 focus:border-blue-400 focus:outline-none transition-all shadow-xxs"
                                                     />
+                                                  </div>
+                                                </div>
+
+                                                {/* Proportional Equalizer Segments for Mobile */}
+                                                <div className="space-y-1">
+                                                  <div className="flex gap-1 justify-between w-full bg-slate-200/50 p-1 rounded-md">
+                                                    {Array.from({ length: 10 }).map((_, idx) => {
+                                                      const threshold = ((idx + 1) / 10) * 100;
+                                                      const isActive = ratio >= threshold;
+                                                      return (
+                                                        <div 
+                                                          key={idx} 
+                                                          className={`h-2 flex-1 rounded-xs transition-all duration-300 ${
+                                                            isActive ? 'bg-emerald-500' : 'bg-amber-500'
+                                                          }`} 
+                                                        />
+                                                      );
+                                                    })}
+                                                  </div>
+                                                  <div className="flex justify-between text-[9px] text-slate-500 font-bold">
+                                                    <span className="text-emerald-700 font-extrabold">ใช้ {ratio.toFixed(0)}%</span>
+                                                    <span className="text-amber-700 font-extrabold">ทิ้ง {(100-ratio).toFixed(0)}%</span>
+                                                  </div>
+                                                </div>
+
+                                                {/* Slider Range for Mobile */}
+                                                <div className="flex items-center gap-3 py-1">
+                                                  <input
+                                                    type="range"
+                                                    min="0"
+                                                    max={expectedTotalCapacity}
+                                                    step={drug.drugName === 'Fentanyl 2 ml' ? 5 : drug.drugName === 'Fentanyl 10 ml' ? 10 : drug.drugName === 'Pethidine' ? 5 : drug.drugName === 'Midazolam' ? 0.5 : drug.drugName === 'Ketamine' ? 10 : 1}
+                                                    value={usedVal}
+                                                    onChange={(e) => {
+                                                      const val = parseFloat(e.target.value) || 0;
+                                                      const waste = Math.max(0, expectedTotalCapacity - val);
+                                                      handleUpdateDrugInCase(c.id, drug.id, { 
+                                                        actualUsed: val.toString(), 
+                                                        wastage: waste.toFixed(2).replace(/\.00$/, '') 
+                                                      });
+                                                    }}
+                                                    className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-700 focus:outline-none"
+                                                  />
+                                                </div>
+
+                                                {/* Presets for Mobile */}
+                                                <div className="space-y-1.5">
+                                                  <span className="block text-[10px] font-bold text-slate-500">ปริมาณแนะนำ (Presets):</span>
+                                                  <div className="flex flex-wrap gap-1.5">
+                                                    {(DRUG_DOSAGE_PRESETS[drug.drugName] || [])
+                                                      .filter(preset => preset <= expectedTotalCapacity)
+                                                      .map(preset => {
+                                                        const isSelected = Math.abs(usedVal - preset) < 0.01;
+                                                        return (
+                                                          <button
+                                                            key={preset}
+                                                            type="button"
+                                                            onClick={() => {
+                                                              const waste = Math.max(0, expectedTotalCapacity - preset);
+                                                              handleUpdateDrugInCase(c.id, drug.id, {
+                                                                actualUsed: preset.toString(),
+                                                                wastage: waste.toFixed(2).replace(/\.00$/, '')
+                                                              });
+                                                            }}
+                                                            className={`px-2.5 py-1.5 rounded-lg text-[10px] font-black transition-all border cursor-pointer ${
+                                                              isSelected
+                                                                ? 'bg-emerald-600 text-white border-emerald-600 shadow-xxs scale-105'
+                                                                : 'bg-white text-slate-700 border-slate-200'
+                                                            }`}
+                                                          >
+                                                            {preset} {meta.unit}
+                                                          </button>
+                                                        );
+                                                      })}
                                                   </div>
                                                 </div>
 
@@ -4430,13 +4428,13 @@ export default function App() {
                         </div>
 
                         {/* Interactive Case Completed Footer - Seamlessly adds next case */}
-                        <div className="bg-purple-50/20 px-6 py-4 border-t border-purple-100/70 flex items-center justify-end">
+                        <div className="bg-blue-50/20 px-6 py-4 border-t border-blue-100/70 flex items-center justify-end">
                           <button
                             type="button"
                             onClick={() => handleCompleteAndAddNextCase(c.id)}
-                            className="inline-flex items-center gap-2 px-4.5 py-2.5 bg-purple-100 hover:bg-purple-200 text-purple-750 font-black text-xs md:text-sm rounded-xl transition duration-200 cursor-pointer shadow-xxs border border-purple-200/50 hover:scale-[1.01]"
+                            className="inline-flex items-center gap-2 px-4.5 py-2.5 bg-blue-100 hover:bg-blue-200 text-blue-800 font-black text-xs md:text-sm rounded-xl transition duration-200 cursor-pointer shadow-xxs border border-blue-200/50 hover:scale-[1.01]"
                           >
-                            <Check className="w-4 h-4 text-purple-700 stroke-[3px]" />
+                            <Check className="w-4 h-4 text-blue-750 stroke-[3px]" />
                             กรอกเคสนี้สำเร็จแล้ว ➔ เตรียมเคสถัดไป
                           </button>
                         </div>
@@ -4448,36 +4446,36 @@ export default function App() {
 
               {/* Step 3 Card for Special Controlled Submit Button - Quiet & Clinical */}
               <div className="lg:col-span-12 mt-4">
-                <div className="bg-white rounded-3xl border border-slate-150 p-6 md:p-8 space-y-6 shadow-sm bg-gradient-to-tr from-white to-purple-50/5">
+                <div className="bg-white rounded-3xl border border-slate-150 p-6 md:p-8 space-y-6 shadow-sm bg-gradient-to-tr from-white to-blue-50/5">
                   <div className="flex items-center gap-3 border-b border-slate-100 pb-4">
-                    <div className="bg-purple-50 p-2.5 rounded-xl text-purple-700">
+                    <div className="bg-blue-50 p-2.5 rounded-xl text-blue-700">
                       <FileText className="w-5 h-5" />
                     </div>
                     <div>
-                      <h3 className="text-base md:text-lg font-black text-purple-950">3. ตรวจสอบข้อมูลรายงานและบันทึกข้อมูล</h3>
+                      <h3 className="text-base md:text-lg font-black text-blue-950">3. ตรวจสอบข้อมูลรายงานและบันทึกข้อมูล</h3>
                       <p className="text-xs text-slate-500 font-bold mt-1">กรุณาสอบทานยอดปริมาณเปิดใช้ ใช้จริง และยาทิ้งให้ถูกต้องตามจริงก่อนทำการบันทึกข้อมูล</p>
                     </div>
                   </div>
 
                   {/* Real-time clinical summary preview */}
-                  <div className="bg-purple-50/15 rounded-2xl p-5 md:p-6 border border-purple-100 space-y-4">
-                    <div className="flex items-center justify-between flex-wrap gap-3 text-xs md:text-sm pb-3 border-b border-purple-100/60">
-                      <div className="flex items-center gap-2 font-black text-purple-950 uppercase tracking-wide">
-                        <Activity className="w-4.5 h-4.5 text-purple-700" />
+                  <div className="bg-blue-50/15 rounded-2xl p-5 md:p-6 border border-blue-100 space-y-4">
+                    <div className="flex items-center justify-between flex-wrap gap-3 text-xs md:text-sm pb-3 border-b border-blue-100/60">
+                      <div className="flex items-center gap-2 font-black text-blue-950 uppercase tracking-wide">
+                        <Activity className="w-4.5 h-4.5 text-blue-700" />
                         สรุปรายการใช้ยาควบคุมพิเศษ (ก่อนบันทึกจริง)
                       </div>
-                      <div className="flex items-center gap-2 bg-white border border-purple-100 px-3.5 py-2 rounded-xl shadow-xxs text-xs md:text-sm">
-                        <User className="w-4 h-4 text-purple-600" />
-                        <span className="text-purple-700 font-bold">ผู้บันทึกข้อมูล:</span>
+                      <div className="flex items-center gap-2 bg-white border border-blue-100 px-3.5 py-2 rounded-xl shadow-xxs text-xs md:text-sm">
+                        <User className="w-4 h-4 text-blue-600" />
+                        <span className="text-blue-700 font-bold">ผู้บันทึกข้อมูล:</span>
                         {requesterName.trim() ? (
-                          <span className="font-extrabold text-purple-950">{requesterName}</span>
+                          <span className="font-extrabold text-blue-950">{requesterName}</span>
                         ) : (
                           <span className="font-black text-amber-600 animate-pulse bg-amber-50 px-2 py-0.5 rounded border border-amber-150">⚠️ กรุณาระบุในขั้นตอนที่ 1</span>
                         )}
                       </div>
                     </div>
 
-                    <div className="divide-y divide-purple-100/80 max-h-[400px] overflow-y-auto pr-2 space-y-4">
+                    <div className="divide-y divide-blue-100/80 max-h-[400px] overflow-y-auto pr-2 space-y-4">
                       {controlledCases.map((c, idx) => {
                         const caseNum = idx + 1;
                         const hasOr = !!c.orRoom;
@@ -4488,16 +4486,16 @@ export default function App() {
                           <div key={c.id} className="pt-3.5 first:pt-0 space-y-3">
                             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs md:text-sm">
                               <div className="flex flex-wrap items-center gap-2">
-                                <span className="text-xs font-black bg-purple-100 text-purple-700 px-2.5 py-0.5 rounded-lg">
+                                <span className="text-xs font-black bg-blue-100 text-blue-700 px-2.5 py-0.5 rounded-lg">
                                   เคสที่ {caseNum}
                                 </span>
-                                <span className={`font-extrabold inline-flex items-center gap-1.5 ${hasOr ? 'text-purple-950' : 'text-red-600 font-black animate-pulse bg-red-50 px-2 py-0.5 rounded border border-red-100'}`}>
-                                  <Building className="w-4 h-4 text-purple-500" />
+                                <span className={`font-extrabold inline-flex items-center gap-1.5 ${hasOr ? 'text-blue-950' : 'text-red-600 font-black animate-pulse bg-red-50 px-2 py-0.5 rounded border border-red-100'}`}>
+                                  <Building className="w-4 h-4 text-blue-500" />
                                   OR: {hasOr ? c.orRoom : 'กรุณาเลือกห้อง OR/แผนก'}
                                 </span>
-                                <span className="text-purple-200 font-bold">|</span>
-                                <span className={`font-extrabold inline-flex items-center gap-1.5 ${hasHn ? 'text-purple-900' : 'text-red-600 font-black animate-pulse bg-red-50 px-2 py-0.5 rounded border border-red-100'}`}>
-                                  <Activity className="w-4 h-4 text-purple-500" />
+                                <span className="text-blue-200 font-bold">|</span>
+                                <span className={`font-extrabold inline-flex items-center gap-1.5 ${hasHn ? 'text-blue-900' : 'text-red-600 font-black animate-pulse bg-red-50 px-2 py-0.5 rounded border border-red-100'}`}>
+                                  <Activity className="w-4 h-4 text-blue-500" />
                                   HN: {hasHn ? c.patientHN : 'กรุณาระบุ HN ผู้ป่วย'}
                                 </span>
                               </div>
@@ -4509,7 +4507,7 @@ export default function App() {
                             </div>
 
                             {/* Case's drug list summary */}
-                            <div className="pl-4 sm:pl-8 space-y-2.5 bg-white p-4 rounded-2xl border border-purple-100/50">
+                            <div className="pl-4 sm:pl-8 space-y-2.5 bg-white p-4 rounded-2xl border border-blue-100/50">
                               {c.drugs.length === 0 ? (
                                 <div className="text-xs text-slate-400 italic font-bold">ไม่มีรายการยาควบคุมพิเศษที่เลือก</div>
                               ) : (
@@ -4526,7 +4524,7 @@ export default function App() {
                                   return (
                                     <div key={drug.id} className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs md:text-sm text-slate-900 border-b border-dashed border-slate-100 last:border-b-0 pb-2 last:pb-0">
                                       <div className="flex items-center gap-2">
-                                        <Pill className="w-3.5 h-3.5 text-purple-600 shrink-0" />
+                                        <Pill className="w-3.5 h-3.5 text-blue-600 shrink-0" />
                                         <span className="font-black text-slate-900">{meta.display}</span>
                                         <span className="text-slate-500 font-bold">
                                           (เปิดใช้ {drug.ampsCount} {meta.type === 'Amp' ? 'แอมป์' : 'ขวด'})
@@ -4575,7 +4573,7 @@ export default function App() {
                       className={`w-full py-4 px-6 rounded-2xl font-black text-sm md:text-base transition-all duration-200 flex items-center justify-center gap-2.5 shadow-md cursor-pointer ${
                         isSubmitting
                           ? 'bg-slate-200 text-slate-400 cursor-not-allowed shadow-none'
-                          : 'bg-gradient-to-r from-purple-700 to-indigo-700 hover:from-purple-800 hover:to-indigo-800 text-white hover:shadow-lg active:scale-[0.99] hover:ring-4 hover:ring-purple-100'
+                          : 'bg-gradient-to-r from-blue-700 to-indigo-700 hover:from-blue-800 hover:to-indigo-800 text-white hover:shadow-lg active:scale-[0.99] hover:ring-4 hover:ring-blue-100'
                       }`}
                     >
                       {isSubmitting ? (
@@ -4595,141 +4593,7 @@ export default function App() {
               </div>
             </form>
 
-            {/* --- REAL-TIME CONTROLLED DRUGS REPORT HISTORY (BOTTOM OF THE PAGE) --- */}
-            <div className="mt-8 bg-white rounded-3xl border border-slate-200 shadow-sm p-6 md:p-8 space-y-6 no-print animate-in fade-in duration-300">
-              
-              {/* Header section with live sync pulses */}
-              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-100 pb-5">
-                <div className="flex items-start gap-3.5">
-                  <div className="bg-emerald-50 text-emerald-600 p-3 rounded-2xl border border-emerald-100 shrink-0">
-                    <ClipboardList className="w-6 h-6 animate-pulse text-emerald-600" />
-                  </div>
-                  <div>
-                    <h3 className="text-lg md:text-xl font-black text-slate-900 tracking-tight flex items-center gap-2">
-                      ประวัติส่งรายงานและตัดยอดใช้ยาควบคุมพิเศษ (เรียลไทม์)
-                    </h3>
-                    <p className="text-xs text-slate-500 font-bold mt-1 leading-relaxed">
-                      รวบรวมและสะท้อนข้อมูลรายงานการใช้จากคอมพิวเตอร์ <span className="text-emerald-600 font-extrabold">ทุกเครื่องในตึกวิสัญญี</span> แบบวินาทีต่อวินาที สต็อกคงคลังกลางจะปรับสมดุลตามทันที
-                    </p>
-                  </div>
-                </div>
 
-                {/* Simulated Activity Signal */}
-                <div className="bg-emerald-50/60 border border-emerald-100/80 rounded-2xl px-4 py-3 flex items-center gap-3 shrink-0">
-                  <span className="relative flex h-3 w-3">
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                    <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
-                  </span>
-                  <div className="text-left">
-                    <span className="text-xs font-black text-slate-800 block">ฟังข้อมูลสด (Live Sync Active)</span>
-                    <span className="text-[10px] text-slate-500 font-semibold">เชื่อมโยงคีย์ข้อมูลห้องผ่าตัด 8 เครื่อง</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Ledger Table */}
-              <div className="overflow-x-auto rounded-2xl border border-slate-200">
-                <table className="w-full text-left border-collapse">
-                  <thead>
-                    <tr className="bg-slate-50/80 text-slate-700 text-xs font-black border-b border-slate-200">
-                      <th className="py-3 px-4">วัน-เวลา</th>
-                      <th className="py-3 px-4">ต้นทาง / ห้อง OR</th>
-                      <th className="py-3 px-4">ผู้ป่วย (HN)</th>
-                      <th className="py-3 px-4">รายการยาและปริมาณที่ใช้จริง</th>
-                      <th className="py-3 px-4">ผู้ทำรายการ</th>
-                      <th className="py-3 px-4 text-center">สถานะ</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-150">
-                    {transactions.filter(tx => tx.specialControlledDrugs && tx.specialControlledDrugs.length > 0).length === 0 ? (
-                      <tr>
-                        <td colSpan={6} className="py-8 text-center text-xs text-slate-400 font-bold italic">
-                          ไม่พบประวัติการคีย์ข้อมูลรายงานยาควบคุมพิเศษในขณะนี้<br/>
-                          <span className="text-[10px] font-normal text-slate-400 not-italic mt-1 block">ระบบกำลังเชื่อมต่อและรอรับการปรับประสานข้อมูลจากห้องผ่าตัดอื่น ๆ แบบเรียลไทม์โดยอัตโนมัติ</span>
-                        </td>
-                      </tr>
-                    ) : (
-                      transactions
-                        .filter(tx => tx.specialControlledDrugs && tx.specialControlledDrugs.length > 0)
-                        .map((tx) => {
-                          const isNew = highlightedTxIds.has(tx.id);
-                          const animationClass = isNew 
-                            ? (tx.notes?.includes('[ยาควบคุมพิเศษ]') || tx.specialControlledDrugs?.length > 0 ? 'animate-row-flash-purple' : 'animate-row-flash-amber') 
-                            : '';
-                          return (
-                            <tr 
-                              key={tx.id} 
-                              id={`tx-row-${tx.id}`} 
-                              className={`text-xs text-slate-800 hover:bg-slate-50/50 transition duration-150 ${animationClass}`}
-                            >
-                              {/* Timestamp */}
-                              <td className="py-3.5 px-4 font-bold text-slate-600 whitespace-nowrap">
-                                {new Date(tx.timestamp).toLocaleString('th-TH', {
-                                  year: 'numeric',
-                                  month: 'short',
-                                  day: 'numeric',
-                                  hour: '2-digit',
-                                  minute: '2-digit',
-                                  second: '2-digit'
-                                })} น.
-                              </td>
-
-                              {/* Device & OR Room */}
-                              <td className="py-3.5 px-4 whitespace-nowrap">
-                                <div className="flex flex-col gap-0.5">
-                                  <span className="font-extrabold text-slate-700 bg-slate-100 px-2 py-0.5 rounded text-[10px] w-fit font-mono">
-                                    {tx.deviceName || 'PC-OR01-ANESTH'}
-                                  </span>
-                                  <span className="font-bold text-slate-500 text-[10px] pl-1">
-                                    {tx.orRoom}
-                                  </span>
-                                </div>
-                              </td>
-
-                              {/* Patient HN */}
-                              <td className="py-3.5 px-4 font-extrabold text-slate-900 whitespace-nowrap">
-                                {tx.patientHN}
-                              </td>
-
-                              {/* Controlled Drug Usage details */}
-                              <td className="py-3.5 px-4">
-                                <div className="space-y-1 max-w-xs md:max-w-md">
-                                  {(tx.specialControlledDrugs || []).map((scd, sIdx) => {
-                                    const matchedMeta = SPECIAL_DRUGS_METADATA[scd.name] || { display: scd.name };
-                                    return (
-                                      <div key={sIdx} className="flex flex-wrap items-center gap-1.5 text-slate-800">
-                                        <span className="font-black text-slate-900 bg-amber-50 text-amber-900 px-2 py-0.5 rounded-md border border-amber-200/50 text-[10px]">
-                                          {matchedMeta.display}
-                                        </span>
-                                        <span className="font-bold text-[11px] text-slate-600">
-                                          {scd.unit}
-                                        </span>
-                                      </div>
-                                    );
-                                  })}
-                                </div>
-                              </td>
-
-                              {/* Staff name */}
-                              <td className="py-3.5 px-4 font-extrabold text-slate-700 whitespace-nowrap">
-                                {tx.requesterName}
-                              </td>
-
-                              {/* Live Synced Status Badge */}
-                              <td className="py-3.5 px-4 text-center whitespace-nowrap">
-                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-black bg-emerald-50 text-emerald-800 border border-emerald-200">
-                                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-                                  Synced 🟢
-                                </span>
-                              </td>
-                            </tr>
-                          );
-                        })
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </div>
 
           </div>
         )}
